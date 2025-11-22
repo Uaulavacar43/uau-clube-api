@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{title}}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github.min.css">
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      line-height: 1.6;
+    }
+    .sidebar {
+      height: 100vh;
+      position: sticky;
+      top: 0;
+      padding-top: 20px;
+      overflow-y: auto;
+      background-color: #f8f9fa;
+      border-right: 1px solid #dee2e6;
+    }
+    .sidebar .nav-link {
+      padding: 0.5rem 1rem;
+      color: #495057;
+      border-radius: 0;
+    }
+    .sidebar .nav-link.active {
+      background-color: #0d6efd;
+      color: white;
+    }
+    .sidebar .nav-link:hover:not(.active) {
+      background-color: #e9ecef;
+    }
+    .content {
+      padding: 20px;
+    }
+    .content h1 {
+      margin-bottom: 1.5rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid #dee2e6;
+    }
+    .content h2 {
+      margin-top: 2rem;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .content h3 {
+      margin-top: 1.5rem;
+    }
+    .content pre {
+      background-color: #f8f9fa;
+      padding: 1rem;
+      border-radius: 0.25rem;
+      overflow-x: auto;
+    }
+    .content table {
+      width: 100%;
+      margin-bottom: 1rem;
+      border-collapse: collapse;
+    }
+    .content table th,
+    .content table td {
+      padding: 0.75rem;
+      border: 1px solid #dee2e6;
+    }
+    .content table thead th {
+      background-color: #f8f9fa;
+      border-bottom: 2px solid #dee2e6;
+    }
+    .content blockquote {
+      padding: 0.5rem 1rem;
+      margin-left: 0;
+      background-color: #f8f9fa;
+      border-left: 4px solid #0d6efd;
+    }
+    .navbar-brand {
+      font-weight: bold;
+      color: #0d6efd;
+    }
+    .doc-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 2rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container-fluid">
+    <div class="row">
+      <!-- Sidebar -->
+      <div class="col-md-3 col-lg-2 sidebar">
+        <div class="d-flex align-items-center mb-3 mb-md-0 me-md-auto">
+          <span class="fs-4 navbar-brand">UAU Clube API</span>
+        </div>
+        <hr>
+        <ul class="nav nav-pills flex-column">
+          {{#each docFiles}}
+            <li class="nav-item">
+              <a href="/docs/{{this}}" class="nav-link {{#if (eq ../selectedDoc this)}}active{{/if}}">
+                {{formatDocName this}}
+              </a>
+            </li>
+          {{/each}}
+        </ul>
+      </div>
+
+      <!-- Main content -->
+      <div class="col-md-9 col-lg-10 content">
+        <div class="doc-header">
+          <h1>{{formatDocName selectedDoc}}</h1>
+          <small class="text-muted">Última atualização: {{formatDate}}</small>
+        </div>
+        {{{docContent}}}
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', (event) => {
+      document.querySelectorAll('pre code').forEach((block) => {
+        hljs.highlightElement(block);
+      });
+    });
+  </script>
+</body>
+</html>

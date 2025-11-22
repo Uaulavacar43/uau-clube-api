@@ -1,0 +1,411 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["logs", "public"]
+}
+
+model User {
+  id                         Int                         @id @default(autoincrement())
+  name                       String
+  email                      String                      @unique
+  password                   String
+  phone                      String
+  cpf                        String?                     @unique
+  role                       Role
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  profileImageUrl            String?
+  otp                        String?
+  firebaseTokens             String[]
+  deletedAt                  DateTime?
+  status                     UserStatus                  @default(ACTIVE)
+  requestLogs                RequestLog[]
+  webhookLogs                WebhookLog[]
+  cars                       Car[]
+  individualServicePurchases IndividualServicePurchase[]
+  payments                   Payment[]
+  subscriptions              Subscription[]
+  washLocations              WashLocation[]              @relation("ManagerToWashLocations")
+  washLocationFavorites      WashLocationFavorite[]
+  washServices               WashService[]               @relation("AdminToWashServices")
+
+  @@schema("public")
+}
+
+model WashLocation {
+  id             Int                    @id @default(autoincrement())
+  name           String
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  city           String
+  managerId      Int
+  neighborhood   String
+  number         String
+  street         String
+  flow           Flow                   @default(LOW)
+  phoneNumber    String?
+  rateQtd        Int                    @default(0)
+  rateValue      Float                  @default(0.0)
+  images         String[]
+  isActive       Boolean                @default(true)
+  deletedAt      DateTime?
+  dailyWashes    DailyWash[]
+  services       LocationService[]
+  openingHours   OpeningHour[]
+  manager        User                   @relation("ManagerToWashLocations", fields: [managerId], references: [id])
+  usersFavorited WashLocationFavorite[]
+
+  @@schema("public")
+}
+
+model WashLocationFavorite {
+  id             Int          @id @default(autoincrement())
+  userId         Int
+  washLocationId Int
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  user           User         @relation(fields: [userId], references: [id])
+  washLocation   WashLocation @relation(fields: [washLocationId], references: [id])
+
+  @@schema("public")
+}
+
+model WashService {
+  id                         Int                         @id @default(autoincrement())
+  name                       String
+  price                      Float
+  imageUrl                   String
+  isAvailable                Boolean                     @default(true)
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @default(now())
+  adminId                    Int
+  isPublished                Boolean                     @default(true)
+  individualServicePurchases IndividualServicePurchase[]
+  locations                  LocationService[]
+  admin                      User                        @relation("AdminToWashServices", fields: [adminId], references: [id])
+  coupons                    Coupon[]                    @relation("CouponToWashService")
+  plans                      Plan[]                      @relation("PlansToWashServices")
+
+  @@schema("public")
+}
+
+model Plan {
+  id              Int             @id @default(autoincrement())
+  name            String
+  price           Float
+  duration        Int
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @default(now())
+  description     String?
+  isBestChoice    Boolean         @default(false)
+  periodicityType PeriodicityType @default(MONTH)
+  isPackage       Boolean         @default(false)
+  extraMonths     Int?
+  payments        Payment[]
+  subscriptions   Subscription[]
+  coupons         Coupon[]        @relation("CouponToPlan")
+  washServices    WashService[]   @relation("PlansToWashServices")
+
+  @@schema("public")
+}
+
+model LocationService {
+  washLocationId Int
+  washServiceId  Int
+  isAvailable    Boolean      @default(true)
+  washLocation   WashLocation @relation(fields: [washLocationId], references: [id])
+  washService    WashService  @relation(fields: [washServiceId], references: [id])
+
+  @@id([washLocationId, washServiceId])
+  @@schema("public")
+}
+
+model OpeningHour {
+  id             Int          @id @default(autoincrement())
+  washLocationId Int
+  day            String
+  open           String
+  close          String
+  breakClose     String?
+  breakOpen      String?
+  index          Int
+  washLocation   WashLocation @relation(fields: [washLocationId], references: [id])
+
+  @@schema("public")
+}
+
+model Car {
+  id            Int            @id @default(autoincrement())
+  model         String
+  plate         String
+  userId        Int
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @default(now())
+  brand         String
+  color         String
+  year          Int
+  deletedAt     DateTime?
+  user          User           @relation(fields: [userId], references: [id])
+  dailyWashes   DailyWash[]
+  subscriptions Subscription[]
+
+  @@schema("public")
+}
+
+model Subscription {
+  id                  Int       @id @default(autoincrement())
+  userId              Int
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  carId               Int?
+  expiresAt           DateTime?
+  isActive            Boolean   @default(true)
+  endDate             DateTime?
+  startDate           DateTime
+  amount              Float     @default(0.0)
+  planType            String
+  paymentMethod       String?
+  planId              Int?
+  subscriptionIdAsaas String?
+  installmentIdAsaas  String?
+  couponId            Int?
+  car                 Car?      @relation(fields: [carId], references: [id])
+  coupon              Coupon?   @relation(fields: [couponId], references: [id])
+  plan                Plan?     @relation(fields: [planId], references: [id])
+  user                User      @relation(fields: [userId], references: [id])
+
+  @@schema("public")
+}
+
+model Payment {
+  id                         Int                         @id @default(autoincrement())
+  userId                     Int
+  amount                     Float
+  paymentDate                DateTime                    @default(now())
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  status                     PaymentStatus               @default(PENDING)
+  paymentMethodId            String?
+  planId                     Int?
+  paymentIdAsaas             String?
+  couponId                   Int?
+  pixPayload                 String?
+  pixQrCode                  String?
+  installments               Int?
+  webhookLogs                WebhookLog[]
+  individualServicePurchases IndividualServicePurchase[]
+  coupon                     Coupon?                     @relation(fields: [couponId], references: [id])
+  plan                       Plan?                       @relation(fields: [planId], references: [id])
+  user                       User                        @relation(fields: [userId], references: [id])
+
+  @@schema("public")
+}
+
+model DailyWash {
+  id             Int           @id @default(autoincrement())
+  carId          Int
+  washDate       DateTime
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @default(now())
+  washLocationId Int?
+  car            Car           @relation(fields: [carId], references: [id])
+  washLocation   WashLocation? @relation(fields: [washLocationId], references: [id])
+
+  @@schema("public")
+}
+
+model Notification {
+  id             Int      @id @default(autoincrement())
+  title          String
+  description    String
+  type           String
+  sentAt         DateTime @default(now())
+  isAutomatic    Boolean  @default(false)
+  totalDelivered Int      @default(0)
+  totalFailed    Int      @default(0)
+  totalSent      Int      @default(0)
+
+  @@schema("public")
+}
+
+model IndividualServicePurchase {
+  id            Int            @id @default(autoincrement())
+  userId        Int
+  washServiceId Int
+  purchaseDate  DateTime       @default(now())
+  status        PurchaseStatus @default(PENDING)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  paymentId     Int
+  payment       Payment        @relation(fields: [paymentId], references: [id])
+  user          User           @relation(fields: [userId], references: [id])
+  washService   WashService    @relation(fields: [washServiceId], references: [id])
+
+  @@schema("public")
+}
+
+model WebhookErrors {
+  id              String   @id @default(uuid())
+  statusCode      Int?
+  subscription_id String?
+  payment_id      String?
+  user_id         String?
+  payload         Json?
+  response        Json?
+  createdAt       DateTime @default(now())
+
+  @@map("webhook_errors")
+  @@schema("public")
+}
+
+model Coupon {
+  id               Int            @id @default(autoincrement())
+  code             String         @unique
+  description      String
+  additionalInfo   String?
+  discountType     DiscountType
+  discountValue    Float
+  maxDiscountValue Float?
+  validFrom        DateTime
+  validUntil       DateTime
+  isActive         Boolean        @default(true)
+  usageLimit       Int?
+  currentUsage     Int            @default(0)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  payments         Payment[]
+  subscriptions    Subscription[]
+  plans            Plan[]         @relation("CouponToPlan")
+  services         WashService[]  @relation("CouponToWashService")
+
+  @@schema("public")
+}
+
+model RequestLog {
+  id        Int          @id @default(autoincrement())
+  userId    Int?
+  requestId String?      @unique // uuid para identificar no response
+  method    String
+  path      String
+  query     Json?
+  body      Json?
+  params    Json?
+  ip        String?
+  userAgent String?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  errors    ErrorLog[]
+  user      User?        @relation(fields: [userId], references: [id])
+  response  ResponseLog?
+
+  @@schema("logs")
+}
+
+model ResponseLog {
+  id        Int         @id @default(autoincrement())
+  requestId Int?        @unique
+  status    String      @default("")
+  data      Json?
+  ip        String?
+  userAgent String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  request   RequestLog? @relation(fields: [requestId], references: [id])
+
+  @@schema("logs")
+}
+
+model ErrorLog {
+  id        Int         @id @default(autoincrement())
+  requestId Int?
+  message   String
+  stack     String?
+  data      Json?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  request   RequestLog? @relation(fields: [requestId], references: [id])
+
+  @@schema("logs")
+}
+
+model WebhookLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?
+  paymentId Int?
+  payload   Json?
+  error     Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  payment   Payment? @relation(fields: [paymentId], references: [id])
+  user      User?    @relation(fields: [userId], references: [id])
+
+  @@schema("logs")
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+
+  @@schema("public")
+}
+
+enum Flow {
+  LOW
+  MODERATE
+  HIGH
+
+  @@schema("public")
+}
+
+enum PeriodicityType {
+  WEEK
+  MONTH
+  YEAR
+  SEMIANNUALLY
+  QUARTERLY
+
+  @@schema("public")
+}
+
+enum PaymentStatus {
+  PAID
+  PENDING
+  CANCELED
+
+  @@schema("public")
+}
+
+enum Role {
+  ADMIN
+  USER
+  MANAGER
+
+  @@schema("public")
+}
+
+enum PurchaseStatus {
+  PENDING
+  COMPLETED
+  CANCELED
+
+  @@schema("public")
+}
+
+enum SubscriptionStatus {
+  active
+  inactive
+
+  @@schema("public")
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+
+  @@schema("public")
+}
