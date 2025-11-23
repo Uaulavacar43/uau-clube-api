@@ -1,455 +1,440 @@
+import { randomUUID } from "crypto";
 import {
-  type Payment,
-  PaymentStatus,
-  Role,
-  type User,
-  UserStatus,
+    type Payment,
+    PaymentStatus,
+    Role,
+    type User,
+    UserStatus,
 } from "@prisma/client";
 
 import prismaClient from "../config/dbConfig";
+import { hashPassword } from "../utils/password";
 import {
-  type AsaasCustomer,
-  type AsaasCustomerListResponse,
-  type AsaasPayment,
-  type AsaasPaymentListResponse,
+    type AsaasCustomer,
+    type AsaasCustomerListResponse,
+    type AsaasPayment,
+    type AsaasPaymentListResponse,
 } from "./asaasTypes";
 import { AsaasHttpClient } from "./AsaasHttpClient";
 
+// =========================================================
+// TIPOS DE RETORNO
+// =========================================================
+
 export interface SyncClientesResultado {
-  totalProcessados: number;
-  totalCriados: number;
-  totalAtualizados: number;
+    totalProcessados: number;
+    totalCriados: number;
+    totalAtualizados: number;
 }
 
 export interface SyncPagamentosResultado {
-  totalProcessados: number;
-  totalCriados: number;
-  totalIgnorados: number;
+    totalProcessados: number;
+    totalCriados: number;
+    totalIgnorados: number;
 }
 
 export interface SyncCompletoResultado {
-  message: string;
-  clientes: SyncClientesResultado;
-  pagamentos: SyncPagamentosResultado;
+    message: string;
+    clientes: SyncClientesResultado;
+    pagamentos: SyncPagamentosResultado;
+}
+
+// =========================================================
+// HELPER PARA PAUSA (RATE LIMIT)
+// =========================================================
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export class AsaasSyncService {
-  private readonly httpClient: AsaasHttpClient;
+    private readonly httpClient: AsaasHttpClient;
 
-  private readonly clientesPorId: Map<string, AsaasCustomer>;
+    // Cache local para vincular pagamentos aos clientes sem bater no banco toda hora
+    private readonly clientesPorId: Map<string, AsaasCustomer>;
 
-  constructor(httpClient?: AsaasHttpClient) {
-    this.httpClient = httpClient ?? new AsaasHttpClient();
-    this.clientesPorId = new Map<string, AsaasCustomer>();
-  }
-
-  // =========================================================
-  // CLIENTES
-  // =========================================================
-
-  async listarClientesDiretoAsaas(
-    offset: number,
-    limit: number,
-  ): Promise<AsaasCustomerListResponse> {
-    return this.httpClient.fetchCustomers(offset, limit);
-  }
-
-  async sincronizarClientes(): Promise<SyncClientesResultado> {
-    const limit: number = 50;
-    let offset: number = 0;
-
-    let totalProcessados: number = 0;
-    let totalCriados: number = 0;
-    let totalAtualizados: number = 0;
-
-    this.clientesPorId.clear();
-
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const pagina: AsaasCustomerListResponse =
-        await this.httpClient.fetchCustomers(offset, limit);
-
-      if (pagina.data.length === 0) {
-        break;
-      }
-
-      // eslint-disable-next-line no-restricted-syntax
-      for (const cliente of pagina.data) {
-        this.clientesPorId.set(cliente.id, cliente);
-
-        // eslint-disable-next-line no-await-in-loop
-        const { criado, atualizado } =
-          await this.criarOuAtualizarUsuarioPorCliente(cliente);
-
-        totalProcessados += 1;
-        if (criado) {
-          totalCriados += 1;
-        }
-        if (atualizado) {
-          totalAtualizados += 1;
-        }
-      }
-
-      if (!pagina.hasMore) {
-        break;
-      }
-
-      offset += limit;
+    constructor(httpClient?: AsaasHttpClient) {
+        this.httpClient = httpClient ?? new AsaasHttpClient();
+        this.clientesPorId = new Map<string, AsaasCustomer>();
     }
 
-    return {
-      totalProcessados,
-      totalCriados,
-      totalAtualizados,
-    };
-  }
+    // =========================================================
+    // CLIENTES
+    // =========================================================
 
-  private async criarOuAtualizarUsuarioPorCliente(
-    cliente: AsaasCustomer,
-  ): Promise<{ criado: boolean; atualizado: boolean }> {
-    const nome: string = cliente.name;
-
-    const emailSanitizado: string | null =
-      cliente.email !== null && cliente.email.trim() !== ""
-        ? cliente.email.trim()
-        : null;
-
-    const telefoneSanitizado: string | null =
-      cliente.mobilePhone !== null && cliente.mobilePhone.trim() !== ""
-        ? cliente.mobilePhone.trim()
-        : cliente.phone !== null && cliente.phone.trim() !== ""
-        ? cliente.phone.trim()
-        : null;
-
-    const cpfSanitizado: string | null =
-      cliente.cpfCnpj !== null && cliente.cpfCnpj.trim() !== ""
-        ? cliente.cpfCnpj.replace(/\D/g, "")
-        : null;
-
-    let usuarioExistente: User | null = null;
-
-    if (cpfSanitizado !== null) {
-      usuarioExistente = await prismaClient.user.findUnique({
-        where: {
-          cpf: cpfSanitizado,
-        },
-      });
+    async listarClientesDiretoAsaas(
+        offset: number,
+        limit: number,
+    ): Promise<AsaasCustomerListResponse> {
+        return this.httpClient.fetchCustomers(offset, limit);
     }
 
-    if (usuarioExistente === null && emailSanitizado !== null) {
-      usuarioExistente = await prismaClient.user.findUnique({
-        where: {
-          email: emailSanitizado,
-        },
-      });
-    }
+    /**
+     * Sincroniza TODOS os clientes.
+     * Estratégia: Loop infinito até 'hasMore' ser false.
+     * Pausa de 2s entre páginas.
+     */
+    async sincronizarClientes(): Promise<SyncClientesResultado> {
+        const limit: number = 100; // Máximo permitido pelo Asaas
+        let offset: number = 0;
+        let paginaAtual: number = 1;
 
-    const telefoneFinal: string = telefoneSanitizado ?? "";
-    const cpfFinal: string | null = cpfSanitizado;
+        let totalProcessados: number = 0;
+        let totalCriados: number = 0;
+        let totalAtualizados: number = 0;
 
-    if (usuarioExistente === null) {
-      const emailFinal: string =
-        emailSanitizado ?? this.gerarEmailPlaceholder(cpfFinal, nome);
+        let totalCountApi: number | null = null;
+        let hasMore: boolean = true;
 
-      const novoUsuario: User = await prismaClient.user.create({
-        data: {
-          name: nome,
-          email: emailFinal,
-          password: this.gerarSenhaPlaceholder(),
-          phone: telefoneFinal,
-          cpf: cpfFinal,
-          role: Role.USER,
-          status: UserStatus.ACTIVE,
-          profileImageUrl: null,
-          otp: null,
-          firebaseTokens: [],
-          deletedAt: null,
-        },
-      });
+        console.log(`[SYNC CLIENTES] Iniciando varredura completa. Limit por pág: ${limit}`);
 
-      // eslint-disable-next-line no-console
-      console.log(
-        `User criado a partir do Asaas: ${novoUsuario.name} (cpf=${novoUsuario.cpf ?? "sem cpf"}, email=${novoUsuario.email}).`,
-      );
+        this.clientesPorId.clear();
 
-      return {
-        criado: true,
-        atualizado: false,
-      };
-    }
+        while (hasMore) {
+            try {
+                // Busca a página
+                const response: AsaasCustomerListResponse =
+                    await this.httpClient.fetchCustomers(offset, limit);
 
-    await prismaClient.user.update({
-      where: {
-        id: usuarioExistente.id,
-      },
-      data: {
-        name: nome,
-        phone: telefoneFinal !== "" ? telefoneFinal : usuarioExistente.phone,
-        cpf: cpfFinal ?? usuarioExistente.cpf,
-        status: UserStatus.ACTIVE,
-      },
-    });
+                // Atualiza controle
+                hasMore = response.hasMore;
+                if (totalCountApi === null) totalCountApi = response.totalCount;
 
-    // eslint-disable-next-line no-console
-    console.log(
-      `User atualizado a partir do Asaas: ${usuarioExistente.name} (id=${usuarioExistente.id}).`,
-    );
+                const quantidadeNaPagina = response.data.length;
 
-    return {
-      criado: false,
-      atualizado: true,
-    };
-  }
+                console.log(
+                    `[SYNC CLIENTES] Pág ${paginaAtual} | Offset ${offset} | Encontrados: ${quantidadeNaPagina} | Total API: ${totalCountApi} | Mais páginas? ${hasMore ? "SIM" : "NÃO"}`
+                );
 
-  private gerarEmailPlaceholder(cpf: string | null, nome: string): string {
-    const base: string =
-      cpf !== null && cpf !== ""
-        ? cpf
-        : nome
-            .toLowerCase()
-            .normalize("NFD")
-            .replace(/[\u0300-\u036f]/g, "")
-            .replace(/[^a-z0-9]+/g, "-")
-            .replace(/^-+|-+$/g, "") || "cliente";
+                if (quantidadeNaPagina === 0) {
+                    console.warn(`[SYNC CLIENTES] Atenção: Página vazia retornada. Encerrando loop de clientes.`);
+                    break;
+                }
 
-    return `${base}@placeholder.uau`;
-  }
+                // Processa cada cliente da página
+                for (const cliente of response.data) {
+                    // Guarda em cache para usar nos pagamentos depois
+                    this.clientesPorId.set(cliente.id, cliente);
 
-  private gerarSenhaPlaceholder(): string {
-    return "imported-from-asaas";
-  }
+                    const { criado, atualizado } =
+                        await this.criarOuAtualizarUsuarioPorCliente(cliente);
 
-  // =========================================================
-  // PAGAMENTOS
-  // =========================================================
+                    totalProcessados++;
+                    if (criado) totalCriados++;
+                    if (atualizado) totalAtualizados++;
+                }
 
-  async listarPagamentosDiretoAsaas(
-    offset: number,
-    limit: number,
-  ): Promise<AsaasPaymentListResponse> {
-    return this.httpClient.fetchPayments(offset, limit);
-  }
+                // Prepara próxima página
+                offset += limit;
+                paginaAtual++;
 
-  async sincronizarPagamentos(): Promise<SyncPagamentosResultado> {
-    const limit: number = 50;
-    let offset: number = 0;
+                // PAUSA PROGRAMADA (Evita Rate Limit 429)
+                if (hasMore) {
+                    // console.log(`[SYNC CLIENTES] Aguardando 2s para próxima página...`);
+                    await delay(2000);
+                }
 
-    let totalProcessados: number = 0;
-    let totalCriados: number = 0;
-    let totalIgnorados: number = 0;
-
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const pagina: AsaasPaymentListResponse =
-        await this.httpClient.fetchPayments(offset, limit);
-
-      if (pagina.data.length === 0) {
-        break;
-      }
-
-      // eslint-disable-next-line no-restricted-syntax
-      for (const pagamento of pagina.data) {
-        // eslint-disable-next-line no-await-in-loop
-        const { criado, ignorado } =
-          await this.criarPagamentoParaUsuarioSeExistir(pagamento);
-
-        totalProcessados += 1;
-
-        if (criado) {
-          totalCriados += 1;
+            } catch (error) {
+                console.error(`[SYNC CLIENTES] Erro fatal na página ${paginaAtual} (offset ${offset}):`, error);
+                // Opcional: break ou throw. Aqui vamos parar para evitar loop infinito de erro.
+                throw error;
+            }
         }
 
-        if (ignorado) {
-          totalIgnorados += 1;
+        return {
+            totalProcessados,
+            totalCriados,
+            totalAtualizados,
+        };
+    }
+
+    private async criarOuAtualizarUsuarioPorCliente(
+        cliente: AsaasCustomer,
+    ): Promise<{ criado: boolean; atualizado: boolean }> {
+        const nome: string = cliente.name;
+
+        const emailSanitizado: string | null =
+            cliente.email !== null && cliente.email.trim() !== ""
+                ? cliente.email.trim()
+                : null;
+
+        const telefoneSanitizado: string | null =
+            cliente.mobilePhone !== null && cliente.mobilePhone.trim() !== ""
+                ? cliente.mobilePhone.trim()
+                : cliente.phone !== null && cliente.phone.trim() !== ""
+                    ? cliente.phone.trim()
+                    : null;
+
+        const cpfSanitizado: string | null =
+            cliente.cpfCnpj !== null && cliente.cpfCnpj.trim() !== ""
+                ? cliente.cpfCnpj.replace(/\D/g, "")
+                : null;
+
+        let usuarioExistente: User | null = null;
+
+        // 1. Tenta achar por CPF
+        if (cpfSanitizado !== null) {
+            usuarioExistente = await prismaClient.user.findUnique({
+                where: { cpf: cpfSanitizado },
+            });
         }
-      }
 
-      if (!pagina.hasMore) {
-        break;
-      }
+        // 2. Tenta achar por Email se não achou por CPF
+        if (usuarioExistente === null && emailSanitizado !== null) {
+            usuarioExistente = await prismaClient.user.findUnique({
+                where: { email: emailSanitizado },
+            });
+        }
 
-      offset += limit;
+        const telefoneFinal: string = telefoneSanitizado ?? "";
+        const cpfFinal: string | null = cpfSanitizado;
+
+        // CRIAÇÃO
+        if (usuarioExistente === null) {
+            const emailFinal: string =
+                emailSanitizado ?? this.gerarEmailPlaceholder(cpfFinal, nome);
+
+            const senhaTemporaria: string = this.gerarSenhaPlaceholder();
+            const senhaHash: string = await hashPassword(senhaTemporaria);
+
+            const novoUsuario: User = await prismaClient.user.create({
+                data: {
+                    name: nome,
+                    email: emailFinal,
+                    password: senhaHash,
+                    phone: telefoneFinal,
+                    cpf: cpfFinal,
+                    role: Role.USER,
+                    status: UserStatus.ACTIVE,
+                    profileImageUrl: null,
+                    otp: null,
+                    firebaseTokens: [],
+                    deletedAt: null,
+                },
+            });
+
+            // Log discreto para não poluir
+            // console.log(`> Criado: ${novoUsuario.name}`);
+
+            return { criado: true, atualizado: false };
+        }
+
+        // ATUALIZAÇÃO
+        await prismaClient.user.update({
+            where: { id: usuarioExistente.id },
+            data: {
+                name: nome,
+                phone: telefoneFinal !== "" ? telefoneFinal : usuarioExistente.phone,
+                cpf: cpfFinal ?? usuarioExistente.cpf,
+                status: UserStatus.ACTIVE, // Reativa se estiver inativo
+            },
+        });
+
+        return { criado: false, atualizado: true };
     }
 
-    return {
-      totalProcessados,
-      totalCriados,
-      totalIgnorados,
-    };
-  }
+    private gerarEmailPlaceholder(cpf: string | null, nome: string): string {
+        const base: string =
+            cpf !== null && cpf !== ""
+                ? cpf
+                : nome
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/^-+|-+$/g, "") || "cliente";
 
-  private async criarPagamentoParaUsuarioSeExistir(
-    pagamento: AsaasPayment,
-  ): Promise<{ criado: boolean; ignorado: boolean }> {
-    const clienteIdAsaas: string = pagamento.customer;
-
-    const clienteAsaas: AsaasCustomer | undefined =
-      this.clientesPorId.get(clienteIdAsaas);
-
-    if (clienteAsaas === undefined) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `Cliente Asaas ${clienteIdAsaas} não encontrado em cache ao processar pagamento ${pagamento.id}. Pagamento ignorado.`,
-      );
-      return {
-        criado: false,
-        ignorado: true,
-      };
+        return `${base}@placeholder.uau`;
     }
 
-    const cpfSanitizado: string | null =
-      clienteAsaas.cpfCnpj !== null && clienteAsaas.cpfCnpj.trim() !== ""
-        ? clienteAsaas.cpfCnpj.replace(/\D/g, "")
-        : null;
-
-    if (cpfSanitizado === null) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `Cliente Asaas ${clienteIdAsaas} sem CPF válido ao processar pagamento ${pagamento.id}. Pagamento ignorado.`,
-      );
-      return {
-        criado: false,
-        ignorado: true,
-      };
+    private gerarSenhaPlaceholder(): string {
+        return randomUUID();
     }
 
-    const usuario: User | null = await prismaClient.user.findUnique({
-      where: {
-        cpf: cpfSanitizado,
-      },
-    });
+    // =========================================================
+    // PAGAMENTOS
+    // =========================================================
 
-    if (usuario === null) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `Nenhum User encontrado com CPF ${cpfSanitizado} ao processar pagamento ${pagamento.id}. Pagamento ignorado.`,
-      );
-      return {
-        criado: false,
-        ignorado: true,
-      };
+    async listarPagamentosDiretoAsaas(
+        offset: number,
+        limit: number,
+    ): Promise<AsaasPaymentListResponse> {
+        return this.httpClient.fetchPayments(offset, limit);
     }
 
-    const existente: Payment | null = await prismaClient.payment.findFirst({
-      where: {
-        userId: usuario.id,
-        paymentIdAsaas: pagamento.id,
-      },
-    });
+    async sincronizarPagamentos(): Promise<SyncPagamentosResultado> {
+        const limit: number = 100; // Máximo
+        let offset: number = 0;
+        let paginaAtual: number = 1;
 
-    if (existente !== null) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `Payment já existe para userId=${usuario.id} e paymentIdAsaas=${pagamento.id}. Ignorando duplicado.`,
-      );
-      return {
-        criado: false,
-        ignorado: true,
-      };
+        let totalProcessados: number = 0;
+        let totalCriados: number = 0;
+        let totalIgnorados: number = 0;
+
+        let totalCountApi: number | null = null;
+        let hasMore: boolean = true;
+
+        console.log(`[SYNC PAGAMENTOS] Iniciando varredura de cobranças. Limit por pág: ${limit}`);
+
+        while (hasMore) {
+            try {
+                const response: AsaasPaymentListResponse =
+                    await this.httpClient.fetchPayments(offset, limit);
+
+                hasMore = response.hasMore;
+                if (totalCountApi === null) totalCountApi = response.totalCount;
+
+                const quantidadeNaPagina = response.data.length;
+
+                console.log(
+                    `[SYNC PAGAMENTOS] Pág ${paginaAtual} | Offset ${offset} | Encontrados: ${quantidadeNaPagina} | Total API: ${totalCountApi} | Mais páginas? ${hasMore ? "SIM" : "NÃO"}`
+                );
+
+                if (quantidadeNaPagina === 0) {
+                    console.warn(`[SYNC PAGAMENTOS] Página vazia. Encerrando.`);
+                    break;
+                }
+
+                for (const pagamento of response.data) {
+                    const { criado, ignorado } =
+                        await this.criarPagamentoParaUsuarioSeExistir(pagamento);
+
+                    totalProcessados++;
+                    if (criado) totalCriados++;
+                    if (ignorado) totalIgnorados++;
+                }
+
+                offset += limit;
+                paginaAtual++;
+
+                // PAUSA PROGRAMADA
+                if (hasMore) {
+                    await delay(2000);
+                }
+
+            } catch (error) {
+                console.error(`[SYNC PAGAMENTOS] Erro na página ${paginaAtual}:`, error);
+                throw error;
+            }
+        }
+
+        return {
+            totalProcessados,
+            totalCriados,
+            totalIgnorados,
+        };
     }
 
-    const statusFinal: PaymentStatus = this.mapearStatusPagamento(pagamento);
+    private async criarPagamentoParaUsuarioSeExistir(
+        pagamento: AsaasPayment,
+    ): Promise<{ criado: boolean; ignorado: boolean }> {
+        const clienteIdAsaas: string = pagamento.customer;
 
-    const dataCriacao: Date =
-      pagamento.dateCreated !== undefined && pagamento.dateCreated !== null
-        ? new Date(pagamento.dateCreated)
-        : new Date();
+        // Busca do cache local populado no passo anterior
+        const clienteAsaas: AsaasCustomer | undefined =
+            this.clientesPorId.get(clienteIdAsaas);
 
-    const dataPagamento: Date =
-      pagamento.paymentDate !== undefined && pagamento.paymentDate !== null
-        ? new Date(pagamento.paymentDate)
-        : dataCriacao;
+        if (clienteAsaas === undefined) {
+            // Se não está no cache, é porque não baixamos esse cliente ou ele foi excluído no Asaas
+            return { criado: false, ignorado: true };
+        }
 
-    const valor: number = pagamento.value;
+        const cpfSanitizado: string | null =
+            clienteAsaas.cpfCnpj !== null && clienteAsaas.cpfCnpj.trim() !== ""
+                ? clienteAsaas.cpfCnpj.replace(/\D/g, "")
+                : null;
 
-    const pixQrCode: string | null =
-      pagamento.pixQrCode !== undefined && pagamento.pixQrCode !== null
-        ? pagamento.pixQrCode
-        : pagamento.qrCode !== undefined && pagamento.qrCode !== null
-        ? pagamento.qrCode
-        : null;
+        if (cpfSanitizado === null) {
+            return { criado: false, ignorado: true };
+        }
 
-    const installments: number | null =
-      pagamento.installmentNumber !== undefined &&
-      pagamento.installmentNumber !== null
-        ? pagamento.installmentNumber
-        : null;
+        // Busca o usuário no DB (que acabou de ser sincronizado)
+        const usuario: User | null = await prismaClient.user.findUnique({
+            where: { cpf: cpfSanitizado },
+        });
 
-    const paymentMethodId: string | null =
-      pagamento.billingType !== undefined && pagamento.billingType !== null
-        ? pagamento.billingType
-        : null;
+        if (usuario === null) {
+            return { criado: false, ignorado: true };
+        }
 
-    const novoPayment: Payment = await prismaClient.payment.create({
-      data: {
-        userId: usuario.id,
-        amount: valor,
-        paymentDate: dataPagamento,
-        status: statusFinal,
-        paymentMethodId,
-        planId: null,
-        paymentIdAsaas: pagamento.id,
-        couponId: null,
-        pixPayload: null,
-        pixQrCode,
-        installments,
-      },
-    });
+        // Verifica duplicidade do pagamento
+        const existente: Payment | null = await prismaClient.payment.findFirst({
+            where: {
+                userId: usuario.id,
+                paymentIdAsaas: pagamento.id,
+            },
+        });
 
-    // eslint-disable-next-line no-console
-    console.log(
-      `Payment criado para userId=${usuario.id} a partir do Asaas (paymentIdAsaas=${novoPayment.paymentIdAsaas}, valor=${novoPayment.amount}).`,
-    );
+        if (existente !== null) {
+            return { criado: false, ignorado: true };
+        }
 
-    return {
-      criado: true,
-      ignorado: false,
-    };
-  }
+        const statusFinal: PaymentStatus = this.mapearStatusPagamento(pagamento);
 
-  private mapearStatusPagamento(pagamento: AsaasPayment): PaymentStatus {
-    const statusBruto: string = pagamento.status.toUpperCase();
+        const dataCriacao: Date =
+            pagamento.dateCreated ? new Date(pagamento.dateCreated) : new Date();
 
-    if (
-      statusBruto === "RECEIVED" ||
-      statusBruto === "CONFIRMED" ||
-      statusBruto === "RECEIVED_IN_CASH" ||
-      statusBruto === "RECEIVED_IN_CREDIT_CARD"
-    ) {
-      return PaymentStatus.PAID;
+        const dataPagamento: Date =
+            pagamento.paymentDate ? new Date(pagamento.paymentDate) : dataCriacao;
+
+        // Tratamento seguro de campos opcionais
+        const pixQrCode: string | null =
+            pagamento.pixQrCode ?? pagamento.qrCode ?? null;
+
+        const installments: number | null = pagamento.installmentNumber ?? null;
+        const paymentMethodId: string | null = pagamento.billingType ?? null;
+
+        const novoPayment = await prismaClient.payment.create({
+            data: {
+                userId: usuario.id,
+                amount: pagamento.value,
+                paymentDate: dataPagamento,
+                status: statusFinal,
+                paymentMethodId,
+                planId: null,
+                paymentIdAsaas: pagamento.id,
+                couponId: null,
+                pixPayload: null,
+                pixQrCode,
+                installments,
+            },
+        });
+
+        return { criado: true, ignorado: false };
     }
 
-    if (statusBruto === "PENDING" || statusBruto === "OVERDUE") {
-      return PaymentStatus.PENDING;
+    private mapearStatusPagamento(pagamento: AsaasPayment): PaymentStatus {
+        const statusBruto: string = pagamento.status.toUpperCase();
+
+        const statusPagos = ["RECEIVED", "CONFIRMED", "RECEIVED_IN_CASH", "RECEIVED_IN_CREDIT_CARD"];
+        const statusCancelados = ["CANCELLED", "CANCELED", "REFUNDED", "CHARGEBACK_REQUESTED", "CHARGEBACK_DISPUTE", "AWAITING_CHARGEBACK_REVERSAL"];
+
+        if (statusPagos.includes(statusBruto)) return PaymentStatus.PAID;
+        if (statusCancelados.includes(statusBruto)) return PaymentStatus.CANCELED;
+
+        return PaymentStatus.PENDING;
     }
 
-    if (
-      statusBruto === "CANCELLED" ||
-      statusBruto === "CANCELED" ||
-      statusBruto === "REFUNDED" ||
-      statusBruto === "CHARGEBACK_REQUESTED" ||
-      statusBruto === "CHARGEBACK_DISPUTE" ||
-      statusBruto === "AWAITING_CHARGEBACK_REVERSAL"
-    ) {
-      return PaymentStatus.CANCELED;
+    // =========================================================
+    // ORQUESTRAÇÃO GERAL
+    // =========================================================
+
+    async sincronizarTudo(): Promise<SyncCompletoResultado> {
+        console.log("========================================");
+        console.log("PASSO 1: Sincronizando Usuários...");
+        console.log("========================================");
+        const clientes: SyncClientesResultado = await this.sincronizarClientes();
+
+        console.log("\n========================================");
+        console.log(`PASSO 1 CONCLUÍDO. Cache com ${this.clientesPorId.size} clientes.`);
+        console.log("PASSO 2: Sincronizando Pagamentos...");
+        console.log("========================================");
+
+        const pagamentos: SyncPagamentosResultado = await this.sincronizarPagamentos();
+
+        return {
+            message: "Sincronização completa (clientes + pagamentos) concluída.",
+            clientes,
+            pagamentos,
+        };
     }
-
-    return PaymentStatus.PENDING;
-  }
-
-  // =========================================================
-  // ORQUESTRAÇÃO GERAL
-  // =========================================================
-
-  async sincronizarTudo(): Promise<SyncCompletoResultado> {
-    const clientes: SyncClientesResultado = await this.sincronizarClientes();
-    const pagamentos: SyncPagamentosResultado =
-      await this.sincronizarPagamentos();
-
-    return {
-      message: "Sincronização completa (clientes + pagamentos) concluída.",
-      clientes,
-      pagamentos,
-    };
-  }
 }

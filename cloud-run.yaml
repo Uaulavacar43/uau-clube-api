@@ -3,7 +3,6 @@ apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
   name: uau-clube-api
-  # namespace é opcional no Cloud Run gerenciado; deixar ou remover não quebra.
   namespace: metal-music-479113-v9
 spec:
   template:
@@ -13,17 +12,21 @@ spec:
           env:
             - name: NODE_ENV
               value: "production"
-            - name: PORT
-              value: "3002"
-            - name: FRONTEND_URL
-              value: "http://localhost:5173"
 
+
+            # URL pública do app (Firebase Hosting + domínio customizado)
+            - name: FRONTEND_URL
+              value: "https://uaulavacar.com.br"
+
+            # DATABASE – GOOGLE CLOUD SQL (lavacar)
             - name: DATABASE_URL
               value: "postgresql://postgres:Lavacar2024!uau@34.39.229.12:5432/postgres?schema=public"
 
+            # AUTH
             - name: JWT_SECRET
               value: "1f46847f2786244a9cf134d613e1a8fbf332c05c37e70f1899596c066f6c647a"
 
+            # MAILER
             - name: MAILER_HOST
               value: "smtp.gmail.com"
             - name: MAILER_PORT
@@ -37,12 +40,16 @@ spec:
             - name: MAILER_ADMIN_EMAIL
               value: "uaulavacar46@gmail.com"
 
+            # ASAAS (Produção – igual ao .env)
             - name: ASAAS_API_URL
-              value: "https://sandbox.asaas.com/api/v3"
+              value: "https://www.asaas.com/api/v3"
             - name: ASAAS_API_KEY
-              value: "$aact_MzkwODA2MWY2OGM3MWRlMDU2NWM3MzJlNzZmNGZhZGY6OmM1OTMyZWE0LTkyMjEtNGJlMC1hODBhLTYxOTA3NWU4YmQxMjo6JGFhY2hfMDJjZDY2MTQtNDI5Ny00MjcwLWFiOTQtODU3Y2ZjM2U5ZGQ1"
+              value: "$aact_prod_000MzkwODA2MWY2OGM3MWRlMDU2NWM3MzJlNzZmNGZhZGY6OjgyZjRhYzUwLTA4ZDktNDA3YS1hNGY4LTA0ZjhjN2JiMmQ4Mjo6JGFhY2hfZTc1MGI3N2QtMzA2OS00YmViLWJlZjktNjZlYTkwNjVmYzcx"
+            - name: ASAAS_ACCESS_TOKEN
+              value: "123123"
 
+            # GOOGLE CLOUD STORAGE
             - name: GCS_BUCKET_NAME
               value: "uau-lavacar-arquivos"
             - name: GOOGLE_CLOUD_PROJECT
-              value: "metal-music-479113-v9"
+              value: "metal-music-479113"
