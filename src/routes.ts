@@ -1,5 +1,6 @@
 import express, { Router } from "express";
 import path from "path";
+
 import authRoutes from "./modules/auth/routes";
 import couponRoutes from "./modules/coupon/routes";
 import dailyWashRoutes from "./modules/dailyWash/routes";
@@ -9,16 +10,22 @@ import { fileUploadRoutes } from "./modules/fileUpload";
 import notifications from "./modules/notification/routes";
 import paymentRoutes from "./modules/payment";
 import plans from "./modules/plan/routes";
-import subscription from "./modules/subscription/routes"; // Importa las rutas del módulo subscription
+import subscription from "./modules/subscription/routes";
 import users from "./modules/userAdmin/routes";
-import userCarRoutes from "./modules/userCar/routes"; // Importa las rutas del módulo userCar
+import userCarRoutes from "./modules/userCar/routes";
 import userProfile from "./modules/userProfile/routes";
 import washServiceRoutes from "./modules/wash-service/routes";
 import WashLocation from "./modules/washLocation/routes";
 
+// Asaas (sincronização clientes + pagamentos)
+import asaasRoutes from "./assas/asaas.routes";
+
 const routes = Router();
+
+// Arquivos estáticos de upload
 routes.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
+// Rotas da aplicação
 routes.use("/auth", authRoutes);
 routes.use("/dashboard", dashboardRoutes);
 routes.use("/wash-services", washServiceRoutes);
@@ -34,5 +41,8 @@ routes.use("/plans", plans);
 routes.use("/file-upload", fileUploadRoutes);
 routes.use("/docs", docsRoutes);
 routes.use("/coupons", couponRoutes);
+
+// Rotas de integração/sincronização com Asaas
+routes.use("/asaas", asaasRoutes);
 
 export default routes;

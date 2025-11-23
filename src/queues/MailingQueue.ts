@@ -1,53 +1,19 @@
-import { Worker as BullWorker, type ConnectionOptions, Queue } from "bullmq";
-import { QUEUES } from "../config/queues";
-import redisConfig from "../config/redis";
+// src/queues/MailingQueue.ts
+
 import { Mailer, type MailPayload } from "../third-party/Mailer";
 
-const connection: ConnectionOptions = {
-	host: redisConfig.host,
-	port: redisConfig.port,
-};
-
 export class MailingQueue {
-	public queue = new Queue(QUEUES.MAILING, { connection });
+    private readonly mailer = new Mailer();
 
-	private mailer = new Mailer();
+    public async addToQueue(mailPayload: MailPayload, error?: string): Promise<void> {
+        // Antes: enfileirava no Redis (BullMQ) com { ...mailPayload, error }
+        // O worker ignorava "error" (desestruturava como error: _).
+        // Agora: envia o e-mail diretamente.
+        const { to, subject, text, html } = mailPayload;
 
-	public worker = new BullWorker(
-		QUEUES.MAILING,
-		async (job) => {
-			const {
-				to,
-				subject,
-				text,
-				html,
-				error: _,
-			} = job.data as MailPayload & { error?: string };
-			job.updateProgress(10);
-			await this.mailer.sendMessage({ to, subject, text, html });
-			job.updateProgress(100);
-		},
-		{ connection },
-	);
+        // Se quiser, aqui daria para logar o "error" em algum lugar no futuro.
+        void error;
 
-	public addToQueue(mailPayload: MailPayload, error?: string) {
-		this.queue.add(
-			QUEUES.MAILING,
-			{ ...mailPayload, error },
-			{
-				attempts: 3,
-				removeOnComplete: {
-					age: 1000 * 60 * 60 * 24 * 30, // 1 month
-					count: 1000,
-				},
-				removeOnFail: {
-					age: 1000 * 60 * 60 * 24 * 90, // 3 month
-				},
-				backoff: {
-					type: "exponential",
-					delay: 2000, // 2 seconds
-				},
-			},
-		);
-	}
+        await this.mailer.sendMessage({ to, subject, text, html });
+    }
 }

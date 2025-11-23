@@ -1,147 +1,182 @@
-import {
-	DeleteObjectCommand,
-	DeleteObjectsCommand,
-	ListObjectsV2Command,
-	PutObjectCommand,
-	paginateListObjectsV2,
-	S3Client,
-} from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+// src/utils/awsS3.ts
+// Implementação usando Google Cloud Storage, mantendo a mesma API pública
+// (createPresignedUrl, uploadObjectToAws, etc).
+
 import path from "path";
+import { Storage, GetSignedUrlConfig, DeleteFilesOptions } from "@google-cloud/storage";
 import { envConfig } from "../config/envConfig";
 
-const client = new S3Client({
-	region: envConfig.AWS_S3_BUCKET_REGION,
-	credentials: {
-		accessKeyId: envConfig.AWS_ACCESS_KEY,
-		secretAccessKey: envConfig.AWS_SECRET_KEY,
-	},
+const storage: Storage = new Storage({
+    projectId: envConfig.GOOGLE_CLOUD_PROJECT,
+    // Se GOOGLE_APPLICATION_CREDENTIALS estiver setado no .env,
+    // o SDK já usa automaticamente. Não precisamos passar aqui.
 });
 
-export function getS3AmbientFolder() {
-	if (envConfig.NODE_ENV.includes("prod")) return "prod";
-	if (envConfig.NODE_ENV.includes("dev")) return "dev";
-	if (envConfig.NODE_ENV.startsWith("h")) return "homol";
+const bucket = storage.bucket(envConfig.GCS_BUCKET_NAME);
 
-	return "dev";
+/**
+ * Mantém a mesma lógica de ambiente usada antes.
+ */
+export function getS3AmbientFolder(): string {
+    const nodeEnv: string = envConfig.NODE_ENV.toLowerCase();
+
+    if (nodeEnv.includes("prod")) {
+        return "prod";
+    }
+
+    if (nodeEnv.includes("dev")) {
+        return "dev";
+    }
+
+    if (nodeEnv.startsWith("h")) {
+        return "homol";
+    }
+
+    return "dev";
+}
+
+function buildObjectPath(folder: string, fileName?: string): string {
+    const ambient: string = getS3AmbientFolder();
+
+    if (fileName !== undefined && fileName.trim() !== "") {
+        return path.posix.join(ambient, folder, fileName);
+    }
+
+    return path.posix.join(ambient, folder);
+}
+
+function publicUrlFor(objectPath: string): string {
+    // URL pública padrão do GCS (bucket público ou via regras)
+    // Ex: https://storage.googleapis.com/<bucket>/<path>
+    const normalized: string = objectPath.replace(/\\/g, "/");
+    return `https://storage.googleapis.com/${envConfig.GCS_BUCKET_NAME}/${normalized}`;
 }
 
 interface CreatePresignedUrlParams {
-	folder: string;
-	fileName: string;
-	contentType: string;
+    folder: string;
+    fileName: string;
+    contentType: string;
 }
 
+/**
+ * Cria URL assinada de upload (PUT) + URL pública de leitura.
+ * - url: URL assinada para upload direto (frontend → GCS)
+ * - urlView: URL pública de leitura do arquivo após upload
+ */
 export const createPresignedUrl = async ({
-	folder,
-	fileName,
-	contentType,
-}: CreatePresignedUrlParams) => {
-	const fileKeyPath = path.posix.join(getS3AmbientFolder(), folder, fileName);
-	const command = new PutObjectCommand({
-		Bucket: envConfig.AWS_S3_BUCKET_NAME,
-		Key: fileKeyPath,
-		ContentType: contentType,
-		// Body: JSON.stringify({ hello: 'S3' }),
-	});
-	const url = await getSignedUrl(client, command, { expiresIn: 3600 * 24 }); // 1 day
+                                             folder,
+                                             fileName,
+                                             contentType,
+                                         }: CreatePresignedUrlParams): Promise<{
+    url: string;
+    urlView: string;
+}> => {
+    const objectPath: string = buildObjectPath(folder, fileName);
+    const file = bucket.file(objectPath);
 
-	const urlView = `https://s3.${envConfig.AWS_S3_BUCKET_REGION}.amazonaws.com/${envConfig.AWS_S3_BUCKET_NAME}/${fileKeyPath}`;
+    const config: GetSignedUrlConfig = {
+        action: "write",
+        expires: Date.now() + 24 * 60 * 60 * 1000, // 24h
+        contentType,
+    };
 
-	return {
-		url,
-		urlView,
-	};
+    const [signedUrl] = await file.getSignedUrl(config);
+    const urlView: string = publicUrlFor(objectPath);
+
+    return {
+        url: signedUrl,
+        urlView,
+    };
 };
 
 interface UploadFileToAwsParams {
-	folder: string;
-	fileName: string;
-	file: Buffer | string;
-	contentType: string;
+    folder: string;
+    fileName: string;
+    file: Buffer | string;
+    contentType: string;
 }
 
+/**
+ * Upload feito pelo backend diretamente para o GCS.
+ * Retorna a URL pública.
+ */
 export const uploadObjectToAws = async ({
-	folder,
-	fileName,
-	file,
-	contentType,
-}: UploadFileToAwsParams) => {
-	const fileKeyPath = path.posix.join(getS3AmbientFolder(), folder, fileName);
-	const command = new PutObjectCommand({
-		Bucket: envConfig.AWS_S3_BUCKET_NAME,
-		Key: fileKeyPath,
-		ContentType: contentType,
-		Body: file,
-	});
+                                            folder,
+                                            fileName,
+                                            file,
+                                            contentType,
+                                        }: UploadFileToAwsParams): Promise<string> => {
+    const objectPath: string = buildObjectPath(folder, fileName);
+    const fileRef = bucket.file(objectPath);
 
-	await client.send(command);
-	const url = `https://s3.${envConfig.AWS_S3_BUCKET_REGION}.amazonaws.com/${envConfig.AWS_S3_BUCKET_NAME}/${fileKeyPath}`;
+    await fileRef.save(file, {
+        contentType,
+        resumable: false,
+    });
 
-	return url;
+    const url: string = publicUrlFor(objectPath);
+
+    return url;
 };
 
+/**
+ * Remove um único arquivo OU tenta remover um "pseudo-arquivo" de pasta.
+ */
 export const removeObjectFromAws = async ({
-	folder,
-	fileName,
-}: {
-	folder: string;
-	fileName?: string;
-}) => {
-	const keyPath = path.posix.join(getS3AmbientFolder(), folder);
-	const command = new DeleteObjectCommand({
-		Bucket: envConfig.AWS_S3_BUCKET_NAME,
-		Key: fileName ? path.posix.join(keyPath, fileName) : keyPath,
-	});
+                                              folder,
+                                              fileName,
+                                          }: {
+    folder: string;
+    fileName?: string;
+}): Promise<void> => {
+    const objectPath: string = buildObjectPath(folder, fileName);
 
-	return client.send(command);
+    try {
+        await bucket.file(objectPath).delete({ ignoreNotFound: true });
+    } catch (error) {
+        // Se der erro por não encontrado, ignoramos; outros erros devem subir.
+        // eslint-disable-next-line no-console
+        console.error("Erro ao remover objeto do GCS:", error);
+    }
 };
 
-export const removeDirectoryFromAws = async (folder: string) => {
-	const keyPath = path.posix.join(getS3AmbientFolder(), folder, "/");
+/**
+ * Remove todos os arquivos que tenham prefixo da pasta.
+ */
+export const removeDirectoryFromAws = async (folder: string): Promise<void> => {
+    const prefix: string = `${buildObjectPath(folder).replace(/\\/g, "/")}/`;
 
-	const existFolder = await checkIfFolderExistsInAws(folder);
-	if (!existFolder) return;
+    const options: DeleteFilesOptions = {
+        prefix,
+    };
 
-	async function getAndDelete(currentContinuationToken?: string) {
-		const page = await paginateListObjectsV2(
-			{ client, pageSize: 1000, startingToken: currentContinuationToken },
-			{ Bucket: envConfig.AWS_S3_BUCKET_NAME, Prefix: keyPath },
-		).next();
-
-		const command = new DeleteObjectsCommand({
-			Bucket: envConfig.AWS_S3_BUCKET_NAME,
-			Delete: {
-				Objects: page.value?.Contents?.map(({ Key }) => ({ Key })) ?? [],
-			},
-		});
-
-		await client.send(command);
-
-		if (page.value?.NextContinuationToken) {
-			await getAndDelete(page.value.NextContinuationToken);
-		} else {
-			if (!page.value?.Prefix) return;
-			await removeObjectFromAws({ folder: page.value.Prefix });
-		}
-	}
-
-	await getAndDelete();
+    try {
+        // deleteFiles remove todos os objetos com o prefixo fornecido
+        await bucket.deleteFiles(options);
+    } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error("Erro ao remover diretório no GCS:", error);
+    }
 };
 
+/**
+ * Verifica se existe ao menos um objeto com aquele prefixo (pasta lógica).
+ */
 export const checkIfFolderExistsInAws = async (
-	folder: string,
+    folder: string,
 ): Promise<boolean> => {
-	const keyPath = path.posix.join(getS3AmbientFolder(), folder, "/");
+    const prefix: string = `${buildObjectPath(folder).replace(/\\/g, "/")}/`;
 
-	const command = new ListObjectsV2Command({
-		Bucket: envConfig.AWS_S3_BUCKET_NAME,
-		Prefix: keyPath,
-		MaxKeys: 1, // Limita a busca a apenas um objeto
-	});
+    try {
+        const [files] = await bucket.getFiles({
+            prefix,
+            maxResults: 1,
+        });
 
-	const response = await client.send(command);
-
-	// Verifica se hÃ¡ algum objeto com o prefixo fornecido
-	return !!response.Contents && response.Contents.length > 0;
+        return files.length > 0;
+    } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error("Erro ao verificar pasta no GCS:", error);
+        return false;
+    }
 };
