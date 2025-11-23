@@ -32,13 +32,10 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.758.0",
     "@aws-sdk/s3-request-presigner": "^3.758.0",
-    "@bull-board/api": "^6.13.1",
-    "@bull-board/express": "^6.13.1",
     "@google-cloud/storage": "^7.17.3",
     "@prisma/client": "^5.21.1",
     "axios": "^1.7.9",
     "bcryptjs": "^2.4.3",
-    "bullmq": "^5.61.0",
     "cors": "^2.8.5",
     "cpf-cnpj-validator": "^1.0.3",
     "dotenv": "^16.4.5",
