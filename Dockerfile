@@ -9,11 +9,14 @@ WORKDIR /usr/src/app
 # Copia apenas package.json e package-lock.json para aproveitar cache
 COPY package*.json ./
 
-# Instala TODAS as dependências (incluindo dev) para poder buildar TypeScript
+# Instala TODAS as dependências (incluindo dev) para poder buildar TypeScript e gerar Prisma
 RUN npm ci
 
-# Copia o restante do código
+# Copia o restante do código (inclui prisma/schema.prisma)
 COPY . .
+
+# Gera o Prisma Client dentro da imagem
+RUN npx prisma generate
 
 # Build (gera dist/ via tsup)
 RUN npm run build
@@ -24,8 +27,6 @@ RUN npm prune --omit=dev
 # Define ambiente de produção
 ENV NODE_ENV=production
 
-# Porta que a app escuta (mesma do .env)
-ENV PORT=3002
-
+# Não fixa PORT aqui: o Cloud Run injeta PORT e seu código lê de process.env.PORT
 # Comando de inicialização
 CMD ["node", "dist/server.js"]

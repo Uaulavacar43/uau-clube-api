@@ -3,34 +3,46 @@ apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
   name: uau-clube-api
-  namespace: app-uau
+  # namespace é opcional no Cloud Run gerenciado; deixar ou remover não quebra.
+  namespace: metal-music-479113-v9
 spec:
   template:
     spec:
       containers:
-        - image: us-central1-docker.pkg.dev/app-uau/uau/uau-clube-api:latest
+        - image: us-central1-docker.pkg.dev/metal-music-479113-v9/uau/uau-clube-api:latest
           env:
             - name: NODE_ENV
               value: "production"
             - name: PORT
               value: "3002"
+            - name: FRONTEND_URL
+              value: "http://localhost:5173"
+
             - name: DATABASE_URL
               value: "postgresql://postgres:Lavacar2024!uau@34.39.229.12:5432/postgres?schema=public"
+
             - name: JWT_SECRET
-              value: "..."
+              value: "1f46847f2786244a9cf134d613e1a8fbf332c05c37e70f1899596c066f6c647a"
+
             - name: MAILER_HOST
-              value: "smtp.hostinger.com"
+              value: "smtp.gmail.com"
             - name: MAILER_PORT
               value: "465"
             - name: MAILER_USER
-              value: "uau-clube@roomcompany.co"
+              value: "uaulavacar46@gmail.com"
             - name: MAILER_PASS
-              value: "@#UAUClube2024"
+              value: "tuwcefhkegllcfxh"
+            - name: MAILER_BCC
+              value: "uaulavacar46@gmail.com"
+            - name: MAILER_ADMIN_EMAIL
+              value: "uaulavacar46@gmail.com"
+
             - name: ASAAS_API_URL
               value: "https://sandbox.asaas.com/api/v3"
             - name: ASAAS_API_KEY
-              value: "$aact_..."
+              value: "$aact_MzkwODA2MWY2OGM3MWRlMDU2NWM3MzJlNzZmNGZhZGY6OmM1OTMyZWE0LTkyMjEtNGJlMC1hODBhLTYxOTA3NWU4YmQxMjo6JGFhY2hfMDJjZDY2MTQtNDI5Ny00MjcwLWFiOTQtODU3Y2ZjM2U5ZGQ1"
+
             - name: GCS_BUCKET_NAME
               value: "uau-lavacar-arquivos"
             - name: GOOGLE_CLOUD_PROJECT
-              value: "app-uau"
+              value: "metal-music-479113-v9"
