@@ -1,0 +1,39 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: uau-clube-api
+  namespace: metal-music-479113
+spec:
+  template:
+    spec:
+      containers:
+        - image: us-central1-docker.pkg.dev/metal-music-479113/uau/uau-clube-api:latest
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3002"
+            - name: DATABASE_URL
+              value: "postgresql://postgres:Lavacar2024!uau@34.39.229.12:5432/postgres?schema=public"
+            - name: REDIS_HOST
+              value: "10.0.0.3"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: JWT_SECRET
+              value: "..."
+            - name: MAILER_HOST
+              value: "smtp.hostinger.com"
+            - name: MAILER_PORT
+              value: "465"
+            - name: MAILER_USER
+              value: "uau-clube@roomcompany.co"
+            - name: MAILER_PASS
+              value: "@#UAUClube2024"
+            - name: ASAAS_API_URL
+              value: "https://sandbox.asaas.com/api/v3"
+            - name: ASAAS_API_KEY
+              value: "$aact_..."
+            - name: GCS_BUCKET_NAME
+              value: "uau-lavacar-arquivos"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "metal-music-479113"
