@@ -1,72 +1,145 @@
+// src/asaas/sync-asaas.ts
+
 import "dotenv/config";
 import { AsaasSyncService } from "./AsaasSyncService";
 import prismaClient from "../config/dbConfig";
 import { envConfig } from "../config/envConfig";
 
+type SyncMode = "clientes" | "pagamentos" | "tudo";
+
+function getSyncModeFromArgs(): SyncMode {
+    const argMode: string | undefined = process.argv[2];
+
+    if (!argMode) {
+        return "tudo";
+    }
+
+    const normalized: string = argMode.toLowerCase();
+
+    if (normalized === "clientes") {
+        return "clientes";
+    }
+
+    if (normalized === "pagamentos") {
+        return "pagamentos";
+    }
+
+    return "tudo";
+}
+
 async function main(): Promise<void> {
-    // Limpa o console para facilitar a leitura do início do processo
     console.clear();
+
+    const mode: SyncMode = getSyncModeFromArgs();
 
     console.log("###########################################################");
     console.log("🚀 INICIANDO SCRIPT DE SINCRONIZAÇÃO MASSIVA (ASAAS -> DB)");
     console.log(`➡️  Ambiente: ${envConfig.NODE_ENV}`);
-    console.log("➡️  Modo: Varredura Completa (Paginação Infinita + Delay)");
+    console.log("➡️  Modo base: Varredura Completa (Paginação Infinita + Delay)");
+    console.log(
+        `➡️  Alvo: ${
+            mode === "tudo"
+                ? "Clientes + Pagamentos"
+                : mode === "clientes"
+                    ? "Apenas Clientes"
+                    : "Apenas Pagamentos"
+        }`,
+    );
     console.log("###########################################################\n");
 
     console.log("🔌 Conectando ao banco de dados...");
 
-    // Instancia o serviço que contém a lógica "trator" (com delay e while true)
     const service: AsaasSyncService = new AsaasSyncService();
 
     try {
-        const tempoInicio = Date.now();
+        const tempoInicio: number = Date.now();
 
-        // Chama o método mestre que orquestra clientes e depois pagamentos
-        const resultado = await service.sincronizarTudo();
+        let resultadoClientes:
+            | {
+            totalProcessados: number;
+            totalCriados: number;
+            totalAtualizados: number;
+        }
+            | null = null;
 
-        const tempoFim = Date.now();
-        const duracaoSegundos = ((tempoFim - tempoInicio) / 1000).toFixed(2);
+        let resultadoPagamentos:
+            | {
+            totalProcessados: number;
+            totalCriados: number;
+            totalIgnorados: number;
+        }
+            | null = null;
+
+        if (mode === "tudo") {
+            const resultadoCompleto = await service.sincronizarTudo();
+            resultadoClientes = resultadoCompleto.clientes;
+            resultadoPagamentos = resultadoCompleto.pagamentos;
+        } else if (mode === "clientes") {
+            console.log("👥 Iniciando sincronização APENAS de CLIENTES...");
+            resultadoClientes = await service.sincronizarClientes();
+        } else if (mode === "pagamentos") {
+            console.log("💳 Iniciando sincronização APENAS de PAGAMENTOS...");
+            // Importante: garantir que o cache de clientes esteja preenchido
+            // Caso ainda não tenha rodado clientes neste processo, podemos
+            // opcionalmente puxar todos os clientes primeiro.
+            console.log(
+                "👥 Pré-carregando clientes do ASAAS para vincular pagamentos...",
+            );
+            await service.sincronizarClientes();
+            resultadoPagamentos = await service.sincronizarPagamentos();
+        }
+
+        const tempoFim: number = Date.now();
+        const duracaoSegundos: string = (
+            (tempoFim - tempoInicio) /
+            1000
+        ).toFixed(2);
 
         console.log("\n✅ Sincronização concluída com sucesso!");
         console.log(`⏱️ Tempo total de execução: ${duracaoSegundos}s`);
         console.log("-----------------------------------------------------------");
 
-        // Exibe relatório de Clientes
-        if (resultado.clientes) {
+        if (resultadoClientes !== null) {
             console.log(
-                `👥 RELATÓRIO DE CLIENTES:` +
-                `\n   - Total Processados (API): ${resultado.clientes.totalProcessados}` +
-                `\n   - Novos Usuários Criados:  ${resultado.clientes.totalCriados}` +
-                `\n   - Usuários Atualizados:    ${resultado.clientes.totalAtualizados}`
+                "👥 RELATÓRIO DE CLIENTES:" +
+                `\n   - Total Processados (API): ${resultadoClientes.totalProcessados}` +
+                `\n   - Novos Usuários Criados:  ${resultadoClientes.totalCriados}` +
+                `\n   - Usuários Atualizados:    ${resultadoClientes.totalAtualizados}`,
             );
         }
 
-        // Exibe relatório de Pagamentos
-        if (resultado.pagamentos) {
+        if (resultadoPagamentos !== null) {
             console.log(
-                `\n💳 RELATÓRIO DE PAGAMENTOS:` +
-                `\n   - Total Processados (API): ${resultado.pagamentos.totalProcessados}` +
-                `\n   - Novos Pagamentos Criados:${resultado.pagamentos.totalCriados}` +
-                `\n   - Ignorados (Já existem):  ${resultado.pagamentos.totalIgnorados}`
+                "\n💳 RELATÓRIO DE PAGAMENTOS:" +
+                `\n   - Total Processados (API): ${resultadoPagamentos.totalProcessados}` +
+                `\n   - Novos Pagamentos Criados:${resultadoPagamentos.totalCriados}` +
+                `\n   - Ignorados (Já existem):  ${resultadoPagamentos.totalIgnorados}`,
             );
         }
 
         console.log("-----------------------------------------------------------");
         console.log("📦 Resultado Bruto (JSON):");
-        console.log(JSON.stringify(resultado, null, 2));
 
+        const resultadoBruto = {
+            mode,
+            clientes: resultadoClientes,
+            pagamentos: resultadoPagamentos,
+        };
+
+        console.log(JSON.stringify(resultadoBruto, null, 2));
     } catch (erro) {
         console.error("\n❌ ERRO FATAL DURANTE A SINCRONIZAÇÃO:");
-        console.error("   O script foi interrompido devido a uma exceção não tratada.");
+        console.error(
+            "   O script foi interrompido devido a uma exceção não tratada.",
+        );
         console.error(erro);
-        throw erro; // Relança para cair no catch do processo principal
+        throw erro;
     } finally {
         console.log("\n🔌 Desconectando do banco de dados...");
         await prismaClient.$disconnect();
     }
 }
 
-// Execução do ponto de entrada
 main()
     .then(() => {
         console.log("\n🏁 Script finalizado corretamente (Exit Code 0).");
@@ -74,7 +147,10 @@ main()
         process.exit(0);
     })
     .catch((erro: unknown) => {
-        console.error("\n❌ Ocorreu um erro não tratado no bloco main:", erro);
+        console.error(
+            "\n❌ Ocorreu um erro não tratado no bloco main:",
+            erro,
+        );
         // eslint-disable-next-line no-process-exit
         process.exit(1);
     });
