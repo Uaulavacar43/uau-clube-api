@@ -1,5 +1,3 @@
-// scripts/mapAsaasData.ts - VERSÃO 3.0 (CASHBACK + PARCELAMENTO + FEATURES)
-
 import {
     PaymentStatus,
     PeriodicityType,
@@ -32,7 +30,7 @@ const PLAN_SERVICES_TEXT: string = PLAN_SERVICES_LIST.join(', ');
 
 // =========================================================================
 // 1. MAPEAMENTO MANUAL CRÍTICO POR PREÇO/TIPO
-//    → APENAS OS 3 PLANOS ATIVOS + SERVIÇOS AVULSOS
+//    → APENAS O PLANO ATIVO (MENSAL) + SERVIÇOS AVULSOS
 // =========================================================================
 
 const CATALOG_MAPPING_PRICES: {
@@ -53,7 +51,7 @@ const CATALOG_MAPPING_PRICES: {
     };
 } = {
     // ---------------------------------------------------------------------
-    // PLANOS (SOMENTE OS 3 ATIVOS)
+    // PLANOS (SOMENTE O MENSAL ATIVO - REMOVEMOS O TRIMESTRAL E ANUAL)
     // ---------------------------------------------------------------------
     plans: {
         // Topzeira Mensal (recorrente, sem parcelamento)
@@ -63,22 +61,6 @@ const CATALOG_MAPPING_PRICES: {
             periodicityType: PeriodicityType.MONTH,
             maxInstallments: 1, // recorrente, 1 cobrança por mês (sem parcelar)
             description: `Topzeira Mensal ilimitado (R$139,90). Cobrança recorrente mensal, sem parcelamento. Inclui: ${PLAN_SERVICES_TEXT}.`,
-        },
-        // Topzeira Trimestral (ATÉ 3x)
-        'Topzeira Trimestral': {
-            price: 389.7,
-            duration: 90,
-            periodicityType: PeriodicityType.QUARTERLY,
-            maxInstallments: 3, // ATÉ 3x
-            description: `Topzeira Trimestral com desconto (3x de R$129,90). Permite parcelamento em até 3x. Inclui: ${PLAN_SERVICES_TEXT}.`,
-        },
-        // Topzeira Anual (ATÉ 12x)
-        'Topzeira Anual': {
-            price: 1438.8,
-            duration: 365,
-            periodicityType: PeriodicityType.YEAR,
-            maxInstallments: 12, // ATÉ 12x
-            description: `Topzeira Anual (12x de R$119,90). Permite parcelamento em até 12x. Inclui: ${PLAN_SERVICES_TEXT}.`,
         },
     },
 
@@ -136,7 +118,7 @@ const PRICE_TO_SERVICE_ID: Record<number, number> = {};
 /**
  * FASE 1: CRIAÇÃO E LIMPEZA DO CATÁLOGO DE PRODUTOS
  * - Garante catálogos de planos com parcelamento (maxInstallments).
- * - Mantém apenas os 3 planos ativos.
+ * - Mantém apenas o plano Mensal.
  * - Cria/atualiza serviços avulsos.
  */
 // =========================================================================
@@ -153,6 +135,8 @@ async function createCatalog(): Promise<void> {
         let plan = await prisma.plan.findUnique({ where: { name: planName } });
 
         if (!plan) {
+            // OBS: O campo isActive não é fornecido aqui, o que está correto
+            // já que ele não existe no schema.
             plan = await prisma.plan.create({
                 data: {
                     name: planName,
@@ -191,7 +175,9 @@ async function createCatalog(): Promise<void> {
         );
     }
 
-    // 2. EXCLUI PLANOS INEXISTENTES (APENAS SE NÃO ESTIVEREM NA LISTA ATIVA)
+    // 2. EXCLUI PLANOS INEXISTENTES
+    // Isso irá excluir o Trimestral e o Anual do BD, já que eles
+    // não estão mais na lista de planos ativos (currentPlanNames).
     const allExistingPlans = await prisma.plan.findMany({
         select: { id: true, name: true },
         where: { name: { notIn: currentPlanNames } },
@@ -397,25 +383,12 @@ async function main(): Promise<void> {
         console.log('\n=======================================================');
         console.log('MIGRAÇÃO DE DADOS DO ASAAS CONCLUÍDA COM SUCESSO!');
         console.log('=======================================================');
-    } catch (e: unknown) {
-        console.error('ERRO DURANTE O PROCESSO DE MIGRAÇÃO:', e);
-
-        if (e instanceof Error) {
-            console.error(`\nERRO: ${e.name} - ${e.message}`);
-            if (e.message.includes('Foreign key constraint failed')) {
-                console.error('\n*** POSSÍVEL ERRO DE FOREIGN KEY ***');
-                console.error(
-                    "Um plano antigo que tentamos deletar ainda está referenciado por uma assinatura ou pagamento. Você precisa zerar (setar como NULL) o 'planId' desses registros antes de deletar o plano.",
-                );
-            }
-        } else {
-            console.error('\nERRO DESCONHECIDO:', e);
-        }
-
+    } catch (error) {
+        console.error('\n❌ Erro crítico na execução principal:', error);
         process.exit(1);
     } finally {
         await prisma.$disconnect();
     }
 }
 
-void main();
+main();

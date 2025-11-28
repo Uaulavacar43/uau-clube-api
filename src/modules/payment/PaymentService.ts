@@ -1,3 +1,4 @@
+// src/modules/payment/PaymentService.ts
 import type { Coupon } from "../../entities/Coupon";
 import type { IndividualServicePurchase } from "../../entities/IndividualServicePurchase";
 import { Payment } from "../../entities/Payment";
@@ -105,7 +106,10 @@ export class PaymentService {
             name: data.creditCardHolderInfo?.name ?? loggedUser.name,
             cpfCnpj: cpf,
             email: data.creditCardHolderInfo?.email ?? loggedUser.email,
-            phone: data.creditCardHolderInfo?.phone ?? loggedUser.phone ?? undefined,
+            phone:
+                data.creditCardHolderInfo?.phone ??
+                loggedUser.phone ??
+                undefined,
             notificationDisabled: true,
         });
 
@@ -188,7 +192,7 @@ export class PaymentService {
             amount,
             asaasCustomer,
             coupon,
-            loggedUser,
+            lockedUser: loggedUser,
         };
     }
 
@@ -226,7 +230,6 @@ export class PaymentService {
             throw new AppError("Plano não encontrado", 404);
         }
 
-        // Regra: plano mensal recorrente NÃO aceita parcelamento em N vezes.
         if (
             !plan.isPackage &&
             plan.periodicityType === PeriodicityType.MONTH &&
@@ -246,8 +249,9 @@ export class PaymentService {
 
         const coupon = await this.validateCoupon(data.coupon, plan.id);
 
-        // 3) Se o carro já tem assinatura, bloquear
-        const hasSubscription = await this.carHasSubscription(car.licensePlate);
+        const hasSubscription = await this.carHasSubscription(
+            car.licensePlate,
+        );
         if (hasSubscription) {
             throw new AppError(
                 "Este carro já tem assinatura, caso queira alterar o plano do carro, cancele a assinatura atual",
@@ -307,7 +311,6 @@ export class PaymentService {
             dateWithTimeZone.getMinutes() + timeZoneOffset,
         );
 
-        // Caso de cupom cobrindo 100% do valor: ativa e já calcula vencimento
         if (is100PercentDiscount) {
             const expiresAt = this.calculatePlanExpiration(
                 plan,
@@ -351,7 +354,6 @@ export class PaymentService {
             };
         }
 
-        // Plano no formato PACOTE (trimestral, anual, etc) => pagamento com parcelas
         if (plan.isPackage) {
             console.log(
                 `[createPayment] Plano no formato pacote, periodicidade: ${plan.periodicityType}`,
@@ -470,7 +472,6 @@ export class PaymentService {
             };
         }
 
-        // Plano NÃO pacote (mensal recorrente, por exemplo) => assinatura ASAAS
         const { subscription, payment } = await this.createAsaasSubscription(
             {
                 ...data,
@@ -496,9 +497,6 @@ export class PaymentService {
         };
     }
 
-    /**
-     * Validar cupom
-     */
     private async validateCoupon(
         code?: string,
         planId?: number,
@@ -526,7 +524,7 @@ export class PaymentService {
 
         const hasPlansRelation = (coupon.plans?.length ?? 0) > 0;
         if (
-            !hasPlansRelation &&
+            hasPlansRelation &&
             planId &&
             !coupon.plans?.some((planItem) => planItem.id === planId)
         ) {
@@ -535,7 +533,7 @@ export class PaymentService {
 
         const hasServicesRelation = (coupon.services?.length ?? 0) > 0;
         if (
-            !hasServicesRelation &&
+            hasServicesRelation &&
             serviceIds &&
             !coupon.services?.some((service) => serviceIds?.includes(service.id))
         ) {
@@ -545,18 +543,6 @@ export class PaymentService {
         return coupon;
     }
 
-    /**
-     * Valida se o número de parcelas informado respeita as regras do plano.
-     *
-     * Regras atuais:
-     * - Se installments <= 1: sempre permitido (à vista).
-     * - Se o plano NÃO tiver maxInstallments configurado (> 0), não permite parcelar.
-     * - Respeita:
-     *   - Plano anual: no máximo 12x.
-     *   - Plano trimestral: no máximo 3x.
-     *   - Plano semestral: no máximo 6x.
-     * - Plano pacote não pode ser mensal.
-     */
     private validatePlanInstallments(plan: Plan, installments?: number) {
         if (plan.isPackage && plan.periodicityType === PeriodicityType.MONTH) {
             throw new AppError(
@@ -582,7 +568,10 @@ export class PaymentService {
             );
         }
 
-        if (plan.periodicityType === PeriodicityType.YEAR && installments > 12) {
+        if (
+            plan.periodicityType === PeriodicityType.YEAR &&
+            installments > 12
+        ) {
             throw new AppError(
                 "O plano anual não pode ter mais de 12 parcelas",
                 400,
@@ -613,6 +602,30 @@ export class PaymentService {
     }
 
     /**
+     * Mapeia evento do ASAAS para status interno, como fallback ao ASAAS_EVENT_STATUS_MAP.
+     */
+    private mapEventToInternalStatus(
+        event: string,
+    ): "PAID" | "PENDING" | "CANCELED" | undefined {
+        switch (event) {
+            case "PAYMENT_CONFIRMED":
+            case "PAYMENT_RECEIVED":
+            case "PAYMENT_CREDIT_CARD_CAPTURED":
+                return "PAID";
+            case "PAYMENT_CREATED":
+            case "PAYMENT_UPDATED":
+            case "PAYMENT_OVERDUE":
+                return "PENDING";
+            case "PAYMENT_DELETED":
+            case "PAYMENT_REFUNDED":
+            case "PAYMENT_RECEIVED_IN_CASH_UNDONE":
+                return "CANCELED";
+            default:
+                return undefined;
+        }
+    }
+
+    /**
      * Manipulador de webhook do ASAAS (pagamentos ou assinaturas).
      * Sempre retorna status 200 OK com uma mensagem curta.
      */
@@ -634,7 +647,10 @@ export class PaymentService {
                 };
             }
 
-            const newStatus = ASAAS_EVENT_STATUS_MAP[event];
+            const newStatus =
+                ASAAS_EVENT_STATUS_MAP[event] ??
+                this.mapEventToInternalStatus(event);
+
             if (!newStatus) {
                 console.warn("[paymentWebhook] Evento não tratado:", event);
                 return {
@@ -658,9 +674,6 @@ export class PaymentService {
         }
     }
 
-    /**
-     * Verifica se o carro já possui assinatura ativa.
-     */
     private async carHasSubscription(licensePlate: string) {
         const existingSubscription =
             await this.subscriptionRepository.findByCarLicensePlate(
@@ -690,7 +703,10 @@ export class PaymentService {
             >([
                 [PeriodicityType.WEEK, ASAASSubscriptionCycleEnum.WEEKLY],
                 [PeriodicityType.MONTH, ASAASSubscriptionCycleEnum.MONTHLY],
-                [PeriodicityType.QUARTERLY, ASAASSubscriptionCycleEnum.QUARTERLY],
+                [
+                    PeriodicityType.QUARTERLY,
+                    ASAASSubscriptionCycleEnum.QUARTERLY,
+                ],
                 [
                     PeriodicityType.SEMIANNUALLY,
                     ASAASSubscriptionCycleEnum.SEMIANNUALLY,
@@ -847,9 +863,6 @@ export class PaymentService {
         }
     }
 
-    /**
-     * Evento de assinatura do webhook do ASAAS
-     */
     private async handleSubscriptionWebhook(
         body: ASAASWebhookEvent,
         newStatus: string,
@@ -883,16 +896,33 @@ export class PaymentService {
                 `[handleSubscriptionWebhook] Processando criação de assinatura ${body.subscription.id}`,
             );
 
-            const externalReference = JSON.parse(
-                body.subscription.externalReference || "",
-            );
-            const { userId, planId, couponId } = externalReference as {
-                userId?: number;
-                planId?: number;
-                couponId?: number;
-            };
+            const externalReferenceRaw =
+                body.subscription.externalReference ?? "";
+            let externalReferenceUserId: number | undefined;
+            let externalReferencePlanId: number | undefined;
+            let externalReferenceCouponId: number | undefined;
 
-            if (!userId || !planId) {
+            if (externalReferenceRaw) {
+                try {
+                    const externalReference = JSON.parse(
+                        externalReferenceRaw,
+                    ) as {
+                        userId?: number;
+                        planId?: number;
+                        couponId?: number;
+                    };
+                    externalReferenceUserId = externalReference.userId;
+                    externalReferencePlanId = externalReference.planId;
+                    externalReferenceCouponId = externalReference.couponId;
+                } catch (parseError) {
+                    console.error(
+                        "[handleSubscriptionWebhook] Erro ao fazer parse da externalReference:",
+                        parseError,
+                    );
+                }
+            }
+
+            if (!externalReferenceUserId || !externalReferencePlanId) {
                 console.error(
                     "[handleSubscriptionWebhook] Erro ao extrair userId ou planId da referência externa.",
                 );
@@ -918,12 +948,12 @@ export class PaymentService {
             }
 
             console.info(
-                `[handleSubscriptionWebhook] Registrando nova assinatura no banco de dados para userId: ${userId}, planId: ${planId}`,
+                `[handleSubscriptionWebhook] Registrando nova assinatura no banco de dados para userId: ${externalReferenceUserId}, planId: ${externalReferencePlanId}`,
             );
 
             const newSubscription = new Subscription({
-                userId,
-                planId,
+                userId: externalReferenceUserId,
+                planId: externalReferencePlanId,
                 planType: body.subscription.cycle,
                 amount: body.subscription.value,
                 isActive: true,
@@ -931,7 +961,7 @@ export class PaymentService {
                 endDate: new Date(body.subscription.nextDueDate),
                 paymentMethod: body.subscription.billingType,
                 subscriptionIdAsaas: body.subscription.id,
-                couponId,
+                couponId: externalReferenceCouponId,
             });
 
             await this.subscriptionRepository.create(newSubscription);
@@ -946,12 +976,6 @@ export class PaymentService {
         }
     }
 
-    /**
-     * Evento de pagamento do webhook do ASAAS (ex. PAYMENT_CONFIRMED, PAYMENT_OVERDUE).
-     * Aqui é onde amarramos:
-     * - Pagamento PAID → assinatura ativa
-     * - E renovação do vencimento (expiresAt) de acordo com a duração do plano.
-     */
     private async handlePaymentWebhook(
         body: ASAASWebhookEvent,
         newStatus: string,
@@ -987,14 +1011,33 @@ export class PaymentService {
                     ? new Date(body.payment.paymentDate)
                     : new Date();
 
-            let { userId, planId, couponId, subId } = JSON.parse(
-                body.payment.externalReference || "",
-            ) as {
-                userId?: number;
-                planId?: number;
-                couponId?: number;
-                subId?: number;
-            };
+            let userId: number | undefined;
+            let planId: number | undefined;
+            let couponId: number | undefined;
+            let subId: number | undefined;
+
+            if (body.payment.externalReference) {
+                try {
+                    const externalReference = JSON.parse(
+                        body.payment.externalReference,
+                    ) as {
+                        userId?: number;
+                        planId?: number;
+                        couponId?: number;
+                        subId?: number;
+                    };
+
+                    userId = externalReference.userId;
+                    planId = externalReference.planId;
+                    couponId = externalReference.couponId;
+                    subId = externalReference.subId;
+                } catch (parseError) {
+                    console.error(
+                        "[handlePaymentWebhook] Erro ao fazer parse da externalReference:",
+                        parseError,
+                    );
+                }
+            }
 
             console.log(
                 `[handlePaymentWebhook] userId inicial: ${userId}, planId inicial: ${planId}, couponId inicial: ${couponId}`,
@@ -1011,6 +1054,16 @@ export class PaymentService {
                 if (localSub) {
                     userId = localSub.userId;
                     planId = localSub.planId;
+                }
+            }
+
+            if (subId) {
+                const subscriptionFromId =
+                    await this.subscriptionRepository.findById(subId);
+                if (subscriptionFromId) {
+                    userId = subscriptionFromId.userId;
+                    planId = subscriptionFromId.planId;
+                    subId = subscriptionFromId.id;
                 }
             }
 
@@ -1066,16 +1119,6 @@ export class PaymentService {
                 }
             }
 
-            if (subId) {
-                const subscription =
-                    await this.subscriptionRepository.findById(subId);
-                if (subscription) {
-                    userId = subscription.userId;
-                    planId = subscription.planId;
-                    subId = subscription.id;
-                }
-            }
-
             const existingPayment =
                 await this.paymentRepository.getByAsaasId(paymentAsaasId);
 
@@ -1087,6 +1130,16 @@ export class PaymentService {
                 }, amount: ${amount}, status: ${newStatus}`,
             );
 
+            const paymentMethodIdFromBody =
+                typeof body.payment.billingType === "string"
+                    ? body.payment.billingType
+                    : null;
+
+            const paymentMethodId =
+                paymentMethodIdFromBody ??
+                existingPayment?.paymentMethodId ??
+                null;
+
             const newPayment = new Payment({
                 userId,
                 planId,
@@ -1095,7 +1148,7 @@ export class PaymentService {
                 status: newStatus as "PAID" | "PENDING" | "CANCELED",
                 paymentDate,
                 paymentIdAsaas: paymentAsaasId,
-                paymentMethodId: body.payment.installment,
+                paymentMethodId,
             });
 
             if (existingPayment) {
@@ -1108,7 +1161,6 @@ export class PaymentService {
                 await this.paymentRepository.create(newPayment);
             }
 
-            // Atualiza assinatura vinculada por subscriptionId do ASAAS ou subId local
             if (body.payment.subscription || subId) {
                 let subscription: Subscription | null = null;
 
@@ -1130,10 +1182,15 @@ export class PaymentService {
                         paymentDate,
                         newStatus,
                     );
+
+                    await this.updateSubscriptionActiveStatusFromPayment(
+                        subscription,
+                        newStatus,
+                        plan,
+                    );
                 }
             }
 
-            // Atualiza assinatura vinculada por installmentIdAsaas (planos pacote)
             if (body.payment.installment) {
                 const subscription =
                     await this.subscriptionRepository.getByInstallmentIdAsaas(
@@ -1144,6 +1201,12 @@ export class PaymentService {
                         subscription,
                         paymentDate,
                         newStatus,
+                    );
+
+                    await this.updateSubscriptionActiveStatusFromPayment(
+                        subscription,
+                        newStatus,
+                        plan,
                     );
                 }
             }
@@ -1163,16 +1226,6 @@ export class PaymentService {
         }
     }
 
-    // --------------------------------------
-    // Helpers de plano / assinatura
-    // --------------------------------------
-
-    /**
-     * Calcula a data de vencimento de um plano, usando:
-     * - plan.duration (dias), se informado;
-     * - fallback pelo periodicityType;
-     * - acresce extraMonths, se houver.
-     */
     private calculatePlanExpiration(plan: Plan, referenceDate: Date): Date {
         const baseDate = new Date(referenceDate.getTime());
 
@@ -1207,16 +1260,6 @@ export class PaymentService {
         return baseDate;
     }
 
-    /**
-     * Novo helper:
-     * A partir de um pagamento do ASAAS, atualiza:
-     * - startDate e expiresAt da assinatura
-     * - isActive da assinatura, em função de PAID / CANCELED.
-     *
-     * Regras:
-     * - Se CANCELED: desativa a assinatura e não recalcula validade.
-     * - Se PAID: usa paymentDate como início e calcula validade com base no plano.
-     */
     private async updateSubscriptionValidityFromPayment(
         subscription: Subscription,
         paymentDate: Date,
@@ -1273,7 +1316,7 @@ export class PaymentService {
 
     /**
      * Helper antigo de atualização de assinatura a partir de pagamento.
-     * Não está mais sendo chamado pelo webhook, mas mantido por compatibilidade.
+     * Agora utilizado como camada de compatibilidade adicional.
      */
     private async updateSubscriptionActiveStatusFromPayment(
         subscription: Subscription,

@@ -6,14 +6,17 @@ import { hash } from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
+// A função togglePlansStatus e sua chamada foram removidas
+// para resolver o erro 'Unknown argument isActive' sem alterar o schema.
+
 async function main() {
-    const targetEmail = 'admin@uauclube.com.br';
-    const targetPassword = '123123';
+    // PARTE 1: CRIAÇÃO/ATUALIZAÇÃO DO USUÁRIO DE TESTE
+    const targetEmail = 'testeapp@teste.com';
+    const targetPassword = 'teste123456';
+    const targetCpf = '00000000002'; // CPF de teste (pode ser ajustado se necessário)
+    const targetName = "Usuário Teste App";
 
-    // Este é o CPF que deu conflito (o placeholder que já existe no banco)
-    const targetCpf = '00000000001';
-
-    console.log(`🔌 Conectando...`);
+    console.log(`\n🔌 Conectando para lidar com o usuário Admin...`);
 
     const passwordHash = await hash(targetPassword, 8);
 
@@ -30,24 +33,23 @@ async function main() {
     // LOGICA DE RESOLUÇÃO DE CONFLITO
     if (userComCpf) {
         console.log(`⚠️ Encontrado usuário existente com CPF ${targetCpf} (ID: ${userComCpf.id}).`);
-        console.log(`🔄 Transformando este usuário no Admin...`);
+        console.log(`🔄 Transformando este usuário no Admin de Teste...`);
 
-        // Se existe um usuário com o email 'admin@...' mas NÃO é o mesmo do CPF,
-        // precisamos deletar o do email para não dar erro de email duplicado ao atualizar o do CPF.
+        // Se existe um usuário com o email alvo mas NÃO é o mesmo do CPF, deleta o do email
         if (userComEmail && userComEmail.id !== userComCpf.id) {
             console.log(`🗑️ Removendo usuário antigo que usava o email ${targetEmail} para evitar duplicidade...`);
             await prisma.user.delete({ where: { id: userComEmail.id } });
         }
 
-        // Atualiza o usuário dono do CPF para ser o Admin
+        // Atualiza o usuário dono do CPF para ser o Admin de Teste
         const user = await prisma.user.update({
             where: { id: userComCpf.id },
             data: {
-                email: targetEmail, // Define o email do admin
+                email: targetEmail,
                 password: passwordHash,
                 role: Role.ADMIN,
                 status: UserStatus.ACTIVE,
-                name: "Super Admin Uau"
+                name: targetName
             }
         });
         logSucesso(user, targetPassword, "ATUALIZADO (Pelo CPF)");
@@ -62,17 +64,18 @@ async function main() {
                 password: passwordHash,
                 role: Role.ADMIN,
                 status: UserStatus.ACTIVE,
-                cpf: targetCpf, // Tenta atribuir o CPF (já sabemos que está livre pois caiu no else do userComCpf)
+                cpf: targetCpf,
+                name: targetName
             }
         });
         logSucesso(user, targetPassword, "ATUALIZADO (Pelo Email)");
 
     } else {
-        console.log(`🆕 Nenhum conflito encontrado. Criando novo Admin...`);
+        console.log(`🆕 Nenhum conflito encontrado. Criando novo Admin de Teste...`);
 
         const user = await prisma.user.create({
             data: {
-                name: "Super Admin Uau",
+                name: targetName,
                 email: targetEmail,
                 password: passwordHash,
                 phone: "85999999999",
