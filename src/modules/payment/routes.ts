@@ -6,6 +6,7 @@ import { CreatePaymentSchema } from "./dto/CreatePaymentDTO";
 import { CreateSubscriptionToPlanSchema } from "./dto/CreateSubscriptionToPlanDTO";
 import { GetAllPaymentsWithDetailsDTO } from "./dto/GetAllPaymentsWithDetailsDTO";
 import { UpdatePaymentStatusSchema } from "./dto/UpdatePaymentStatusDTO";
+import {asaasWebhookAuthMiddleware} from "../../middlewares/asaasWebhookAuth.middleware";
 
 const router = Router();
 
@@ -21,9 +22,11 @@ router.post(
 	validateRoutePayload(CreateSubscriptionToPlanSchema),
 	(req, res, next) => paymentController.subscribeToPlan(req, res, next),
 );
-router.post("/payments-webhook", (req, res, next) => {
-	paymentController.paymentWebhook(req, res, next);
-});
+router.post(
+    "/payments-webhook",
+    asaasWebhookAuthMiddleware,
+    (req, res, next) => paymentController.paymentWebhook(req, res, next),
+);
 
 router.put(
 	"/update-status",
