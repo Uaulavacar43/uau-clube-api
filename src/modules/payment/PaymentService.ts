@@ -53,12 +53,25 @@ import type { GetAllPaymentsWithDetailsDTO } from "./dto/GetAllPaymentsWithDetai
  *   - Diferença do mensal: é um pacote que vence em 30 dias (PeriodicityType.MONTH),
  *     cobrado à vista (sem parcelamento).
  *
- * Regras:
- * - Webhook do ASAAS:
- *   - Marca pagamento como PAID/PENDING/CANCELED;
- *   - Atualiza a assinatura (Subscription) conforme o plano;
- *   - Quando o pagamento é confirmado/recebido, a assinatura é atualizada e o pagamento
- *     local é marcado com o status correto.
+ * Regras principais de domínio:
+ * - Subscription.planType SEMPRE deve refletir Plan.periodicityType
+ *   (ex.: MONTH, YEAR, QUARTERLY, SEMIANNUALLY, WEEK).
+ * - Strings externas do ASAAS (MONTHLY, YEARLY, etc.) nunca são persistidas
+ *   em Subscription.planType.
+ * - Fonte de verdade financeira: Payment com status PAID.
+ *
+ * Regras de cancelamento x remoção (nível de domínio):
+ * - “Cancelar plano”:
+ *   - Não apaga histórico;
+ *   - Marca a Subscription como subscriptionStatus = "CANCELED";
+ *   - subscription.isActive = false;
+ *   - subscription.endDate = data efetiva do cancelamento (normalmente data do pagamento ou data atual);
+ *   - Não cria novos ciclos a partir desse cancelamento.
+ * - “Remover” ou “expirar”:
+ *   - Não apaga histórico;
+ *   - subscription.isActive reflete se expiresAt >= agora;
+ *   - Quando expiresAt < agora, subscriptionStatus passa a "SUSPENDED" (expirada / sem direito a uso), mas não "CANCELED".
+ *   - A reativação virá apenas por um novo Payment PAID, que recalcula a validade.
  */
 export class PaymentService {
     constructor(
@@ -402,6 +415,8 @@ export class PaymentService {
                     expiresAt,
                     paymentMethod: billingPaymentType,
                     couponId: coupon?.id ?? null,
+                    subscriptionStatus: "ACTIVE",
+                    endDate: null,
                 }),
             );
 
@@ -457,6 +472,8 @@ export class PaymentService {
                     expiresAt,
                     paymentMethod: billingPaymentType,
                     couponId: coupon?.id ?? null,
+                    subscriptionStatus: "SUSPENDED",
+                    endDate: null,
                 }),
             );
 
@@ -847,6 +864,8 @@ export class PaymentService {
                         subscriptionIdAsaas: null,
                         couponId: coupon?.id ?? null,
                         expiresAt,
+                        subscriptionStatus: "SUSPENDED",
+                        endDate: null,
                     }),
                 );
 
@@ -1054,6 +1073,19 @@ export class PaymentService {
                 };
             }
 
+            const plan = await this.planRepository.findById(
+                externalReferencePlanId,
+            );
+            if (!plan) {
+                console.error(
+                    `[handleSubscriptionWebhook] Plano ${externalReferencePlanId} não encontrado ao processar SUBSCRIPTION_CREATED.`,
+                );
+                return {
+                    status: 400,
+                    message: "Plano da assinatura não encontrado",
+                };
+            }
+
             const existingSubscription =
                 await this.subscriptionRepository.getByAsaasId(
                     body.subscription.id,
@@ -1072,17 +1104,22 @@ export class PaymentService {
                 `[handleSubscriptionWebhook] Registrando assinatura (inativa até pagamento) para userId: ${externalReferenceUserId}, planId: ${externalReferencePlanId}`,
             );
 
+            const startDate = new Date();
+            const expiresAt = this.calculatePlanExpiration(plan, startDate);
+
             const newSubscription = new Subscription({
                 userId: externalReferenceUserId,
                 planId: externalReferencePlanId,
-                planType: body.subscription.cycle,
+                planType: plan.periodicityType,
                 amount: body.subscription.value,
                 isActive: false,
-                startDate: new Date(),
-                endDate: undefined,
+                startDate,
+                expiresAt,
+                endDate: null,
                 paymentMethod: body.subscription.billingType,
                 subscriptionIdAsaas: body.subscription.id,
                 couponId: externalReferenceCouponId ?? null,
+                subscriptionStatus: "SUSPENDED",
             });
 
             await this.subscriptionRepository.create(newSubscription);
@@ -1098,12 +1135,15 @@ export class PaymentService {
 
         if (newStatus === "CANCELED" && localSubscription) {
             localSubscription.isActive = false;
+            localSubscription.subscriptionStatus = "CANCELED";
+            localSubscription.endDate = new Date();
+
             await this.subscriptionRepository.update(
                 localSubscription.id,
                 localSubscription,
             );
             console.info(
-                `[handleSubscriptionWebhook] Assinatura ${localSubscription.id} desativada por evento de cancelamento.`,
+                `[handleSubscriptionWebhook] Assinatura ${localSubscription.id} desativada por evento de cancelamento, status marcado como CANCELED.`,
             );
         }
     }
@@ -1400,12 +1440,15 @@ export class PaymentService {
     ): Promise<void> {
         if (newStatus === "CANCELED") {
             subscription.isActive = false;
+            subscription.subscriptionStatus = "CANCELED";
+            subscription.endDate = paymentDate;
+
             await this.subscriptionRepository.update(
                 subscription.id,
                 subscription,
             );
             console.log(
-                `[updateSubscriptionValidityFromPayment] Assinatura ${subscription.id} desativada por status CANCELED.`,
+                `[updateSubscriptionValidityFromPayment] Assinatura ${subscription.id} marcada como CANCELED e isActive = false (cancelamento explícito).`,
             );
             return;
         }
@@ -1429,6 +1472,10 @@ export class PaymentService {
             return;
         }
 
+        if (subscription.planType !== plan.periodicityType) {
+            subscription.planType = plan.periodicityType;
+        }
+
         const hasFutureExpiration =
             subscription.expiresAt !== undefined &&
             subscription.expiresAt !== null &&
@@ -1449,13 +1496,22 @@ export class PaymentService {
         subscription.expiresAt = expiresAt;
         subscription.isActive = isActive;
 
+        if (subscription.subscriptionStatus === "CANCELED") {
+            subscription.isActive = false;
+        } else {
+            subscription.subscriptionStatus = isActive ? "ACTIVE" : "SUSPENDED";
+            if (!isActive) {
+                subscription.endDate = expiresAt;
+            }
+        }
+
         await this.subscriptionRepository.update(
             subscription.id,
             subscription,
         );
 
         console.log(
-            `[updateSubscriptionValidityFromPayment] Assinatura ${subscription.id} atualizada => isActive: ${isActive}, startDate: ${subscription.startDate.toISOString()}, expiresAt: ${subscription.expiresAt?.toISOString()}`,
+            `[updateSubscriptionValidityFromPayment] Assinatura ${subscription.id} atualizada => isActive: ${subscription.isActive}, subscriptionStatus: ${subscription.subscriptionStatus}, startDate: ${subscription.startDate.toISOString()}, expiresAt: ${subscription.expiresAt?.toISOString()}`,
         );
     }
 
@@ -1523,9 +1579,20 @@ export class PaymentService {
         }
 
         try {
-            const asaasPayment = await asaasGetPayment(
+            const asaasPaymentRaw = await asaasGetPayment(
                 localPayment.paymentIdAsaas,
             );
+
+            type AsaasPaymentLike = {
+                id: string;
+                status: ASAASPaymentStatusEnum | string;
+                subscription?: string | null;
+                installment?: string | null;
+                externalReference?: string | null;
+                paymentDate?: string | null;
+            };
+
+            const asaasPayment = asaasPaymentRaw as AsaasPaymentLike;
 
             const internalStatusFromAsaas =
                 this.mapAsaasPaymentStatusToInternal(
@@ -1540,6 +1607,67 @@ export class PaymentService {
                     localPayment.id,
                     internalStatusFromAsaas,
                 );
+
+                if (
+                    internalStatusFromAsaas === "PAID" ||
+                    internalStatusFromAsaas === "CANCELED"
+                ) {
+                    let subscription: Subscription | null = null;
+
+                    if (asaasPayment.subscription) {
+                        subscription =
+                            await this.subscriptionRepository.getByAsaasId(
+                                asaasPayment.subscription,
+                            );
+                    }
+
+                    if (!subscription && asaasPayment.installment) {
+                        subscription =
+                            await this.subscriptionRepository.getByInstallmentIdAsaas(
+                                asaasPayment.installment,
+                            );
+                    }
+
+                    if (!subscription && asaasPayment.externalReference) {
+                        try {
+                            const externalReference = JSON.parse(
+                                asaasPayment.externalReference,
+                            ) as { subId?: number };
+                            if (
+                                externalReference.subId !== undefined &&
+                                externalReference.subId !== null
+                            ) {
+                                subscription =
+                                    await this.subscriptionRepository.findById(
+                                        externalReference.subId,
+                                    );
+                            }
+                        } catch (error) {
+                            console.error(
+                                "[syncPaymentWithAsaasByLocalId] Erro ao fazer parse da externalReference:",
+                                error,
+                            );
+                        }
+                    }
+
+                    if (subscription) {
+                        const paymentDate =
+                            asaasPayment.paymentDate !== undefined &&
+                            asaasPayment.paymentDate !== null
+                                ? new Date(asaasPayment.paymentDate)
+                                : new Date();
+
+                        await this.updateSubscriptionValidityFromPayment(
+                            subscription,
+                            paymentDate,
+                            internalStatusFromAsaas,
+                        );
+                    } else {
+                        console.log(
+                            `[syncPaymentWithAsaasByLocalId] Nenhuma assinatura local encontrada para o pagamento Asaas ${localPayment.paymentIdAsaas}.`,
+                        );
+                    }
+                }
             }
         } catch (error) {
             console.error(

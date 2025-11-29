@@ -1,8 +1,8 @@
+# Regras de Negócio – Planos, Assinaturas e Migração ASAAS
 
-# Regras de Negócio – Planos, Assinaturas e Migração ASAAS  
-Topzeira Mensal (Plano 6) – UAU Lava Car  
+Topzeira Mensal (Plano 6) – UAU Lava Car
 
-Autor: Rafael Dias  
+Autor: Rafael Dias
 
 ---
 
@@ -15,6 +15,8 @@ Documentar, de forma operacional e rastreável, as regras de negócio e os passo
 3. Assinaturas reconstruídas a partir da base legada ASAAS (caso Léo “unitário”).
 4. Correções em lote para outros clientes em situação idêntica ao Léo (caso Léo “em lote”).
 5. Regras que devem ser implementadas nos serviços (Pagamentos / Migração / Carros) para que essa situação não volte a acontecer.
+6. Regras de negócio para Cancelamento de plano x Remoção de cliente (limpeza de histórico).
+7. Nova problemática: pagamento confirmado no ASAAS, `Payment.status = PAID`, Subscription existente, mas `isActive = FALSE` por falta de propagação de status quando o webhook não chega (novo caso Eduardo).
 
 ---
 
@@ -24,14 +26,14 @@ Documentar, de forma operacional e rastreável, as regras de negócio e os passo
 
 Campos relevantes:
 
-- `id`
-- `name`
-- `price`
-- `duration` (dias de validade do ciclo)
-- `periodicityType` (`WEEK`, `MONTH`, `YEAR`, `SEMIANNUALLY`, `QUARTERLY`)
-- `isPackage` (se é plano pacote de serviços)
-- `maxInstallments`
-- `extraMonths`
+* `id`
+* `name`
+* `price`
+* `duration` (dias de validade do ciclo)
+* `periodicityType` (`WEEK`, `MONTH`, `YEAR`, `SEMIANNUALLY`, `QUARTERLY`)
+* `isPackage` (se é plano pacote de serviços)
+* `maxInstallments`
+* `extraMonths`
 
 O Topzeira Mensal é o `Plan.id = 6`.
 
@@ -39,45 +41,45 @@ O Topzeira Mensal é o `Plan.id = 6`.
 
 Campos relevantes:
 
-- `id`
-- `userId`
-- `planId` (pode ter vindo `NULL` na migração, depois preenchido)
-- `amount`
-- `status` (`PAID`, `PENDING`, `CANCELED`)
-- `paymentMethodId`
-- `paymentIdAsaas`
-- `paymentDate`
-- `createdAt`
+* `id`
+* `userId`
+* `planId` (pode ter vindo `NULL` na migração, depois preenchido)
+* `amount`
+* `status` (`PAID`, `PENDING`, `CANCELED`)
+* `paymentMethodId`
+* `paymentIdAsaas`
+* `paymentDate`
+* `createdAt`
 
 ### 2.3. Subscription
 
 Campos relevantes:
 
-- `id`
-- `userId`
-- `planId`
-- `carId` (pode ser `NULL` em migrados que ainda não tinham carro)
-- `planType` (texto interno de periodicidade – ex.: `'MONTH'`)
-- `startDate`
-- `expiresAt`
-- `amount`
-- `isActive`
-- `subscriptionStatus` (`ACTIVE`, `SUSPENDED`, `CANCELED`)
-- `subscriptionIdAsaas`
-- `installmentIdAsaas`
-- `couponId`
-- `createdAt`
-- `updatedAt`
+* `id`
+* `userId`
+* `planId`
+* `carId` (pode ser `NULL` em migrados que ainda não tinham carro)
+* `planType` (texto interno de periodicidade – ex.: `'MONTH'`)
+* `startDate`
+* `expiresAt`
+* `amount`
+* `isActive`
+* `subscriptionStatus` (`ACTIVE`, `SUSPENDED`, `CANCELED`)
+* `subscriptionIdAsaas`
+* `installmentIdAsaas`
+* `couponId`
+* `createdAt`
+* `updatedAt`
 
 ### 2.4. Car
 
 Campos relevantes:
 
-- `id`
-- `userId`
-- `plate`
-- `createdAt`
-- demais dados do veículo
+* `id`
+* `userId`
+* `plate`
+* `createdAt`
+* demais dados do veículo
 
 ---
 
@@ -88,12 +90,14 @@ Para qualquer plano do tipo “pacote de serviços” (inclui o Topzeira Mensal)
 1. `Plan.isPackage = TRUE`.
 2. `Plan.periodicityType` define o tipo de periodicidade da assinatura (ex.: `'MONTH'`).
 3. `Plan.duration` define em dias a validade de cada ciclo (ex.: 30 dias).
-4. `Subscription.planType` deve sempre refletir `Plan.periodicityType`  
-   - Exemplo: Topzeira Mensal → `planType = 'MONTH'`.
-   - Strings da ASAAS (`'MONTHLY'`, `'YEARLY'`, etc.) **não** devem ser gravadas em `Subscription.planType`.
+4. `Subscription.planType` deve sempre refletir `Plan.periodicityType`
+
+    * Exemplo: Topzeira Mensal → `planType = 'MONTH'`.
+    * Strings da ASAAS (`'MONTHLY'`, `'YEARLY'`, etc.) **não** devem ser gravadas em `Subscription.planType`.
 5. Assinatura ativa = assinatura com:
-   - `isActive = TRUE`
-   - `expiresAt >= NOW()`.
+
+    * `isActive = TRUE`
+    * `expiresAt >= NOW()`.
 
 Fonte de verdade financeira: último registro de `Payment` com `status = 'PAID'` para `(userId, planId)`.
 
@@ -103,17 +107,18 @@ Fonte de verdade financeira: último registro de `Payment` com `status = 'PAID'`
 
 Sintoma visto na tela “Meus Planos”:
 
-- Cliente paga no ASAAS → `Payment.status = PAID`.
-- Registro em `Payment` existe e está correto.
-- Cliente não vê nenhum plano ativo no app.
+* Cliente paga no ASAAS → `Payment.status = PAID`.
+* Registro em `Payment` existe e está correto.
+* Cliente não vê nenhum plano ativo no app.
 
 Causas combinadas:
 
 1. Em algum momento, `Plan.id = 6` tinha `isPackage = FALSE`.
 2. `Subscription` foi gravada com:
-   - `planType` misturando `'MONTH'` e `'MONTHLY'`.
-   - `isActive` inconsistente com `expiresAt`.
-   - `expiresAt` nulo ou incorreto em várias linhas.
+
+    * `planType` misturando `'MONTH'` e `'MONTHLY'`.
+    * `isActive` inconsistente com `expiresAt`.
+    * `expiresAt` nulo ou incorreto em várias linhas.
 3. Em fluxos legados, `Subscription.carId` estava `NULL` mesmo quando o usuário já tinha carro; a tela de planos filtrava por assinatura atrelada a carro.
 
 Resultado: financeiramente em dia, mas a camada de domínio não batia com as regras de exibição.
@@ -138,7 +143,7 @@ SELECT
   "extraMonths"
 FROM "Plan"
 WHERE "id" = 6;
-````
+```
 
 Situação corrigida (estado desejado):
 
@@ -158,6 +163,8 @@ WHERE "id" = 6;
 
 ### 5.2. Payment do Eduardo (fonte de verdade)
 
+Exemplo de pagamento usado como referência no fluxo novo:
+
 ```sql
 SELECT
   "id",
@@ -172,14 +179,14 @@ FROM "Payment"
 WHERE "id" = 2670;
 ```
 
-Resultado (resumo):
+Resultado (resumo típico):
 
 * `userId = 102`
 * `planId = 6`
 * `amount = 139.9`
 * `status = 'PAID'`
-* `paymentIdAsaas = 'pay_ek6cbqbantuf7m83'`
-* `paymentDate = 2025-11-29 08:27:18.152`
+* `paymentIdAsaas = 'pay_ek6cbqbantuf7m83'` (exemplo)
+* `paymentDate` coerente com a data da cobrança ASAAS
 
 ### 5.3. Subscription do Eduardo – Antes da correção
 
@@ -678,7 +685,7 @@ Exemplo de retorno:
      84 | Cicero                   | mauriti2014@gmail.com            | 2025-11-13 00:00:00 | 2025-10-22 00:00:00 |             3
      85 | Felipe Correia           | felipebroinha@gmail.com          | 2025-11-12 00:00:00 | 2025-10-21 00:00:00 |             3
      90 | Matheus Costa            | scosta.m@outlook.com             | 2025-11-19 00:00:00 | 2025-11-19 00:00:00 |             3
-     92 | Cesar Lima               | cesar3rachel@gmail.com           | 2025-11-19 00:00:00 | 2025-11-19 00:00:00 |             3
+     92 | Cesar Lima               | mauriti2014@gmail.com            | 2025-11-19 00:00:00 | 2025-11-19 00:00:00 |             3
     118 | Isabel Dias Almeida      | isabeldias6422@gmail.com         | 2025-11-11 00:00:00 | 2025-11-11 00:00:00 |             3
     134 | Raphael de Miranda Rocha | rapha.miranda.7@gmail.com        | 2025-11-24 00:00:00 | 2025-11-03 00:00:00 |             4
     144 | Cleudivan                | cleucorgon@gmail.com             | 2025-11-23 00:00:00 | 2025-11-03 00:00:00 |             4
@@ -824,7 +831,7 @@ SELECT
 FROM "Subscription" s
 JOIN "User" u ON u."id" = s."userId"
 JOIN "Plan" p ON p."id" = s."planId"
-WHERE s."id" >= 98 -- por exemplo, IDs criados na leva
+WHERE s."id" >= 98
 ORDER BY s."id";
 ```
 
@@ -862,6 +869,7 @@ Responsabilidades:
 2. Para `(userId, planId, carId)`:
 
     * Localizar Subscription existente **ou** criar uma nova.
+
     * Calcular:
 
         * `startDate`:
@@ -871,6 +879,7 @@ Responsabilidades:
         * `expiresAt`:
 
             * `expiresAt = referencia + duration`.
+
     * Atualizar:
 
         * `planType = Plan.periodicityType`.
@@ -918,7 +927,7 @@ Responsabilidades:
 
     * Se não há carro na base, `carId` continua `NULL` até o usuário cadastrar um veículo no app.
 
-### 8.3. Serviço de Carros (vínculo automátco na criação de veículo)
+### 8.3. Serviço de Carros (vínculo automático na criação de veículo)
 
 Responsabilidades:
 
@@ -1038,3 +1047,680 @@ Com essas regras internalizadas em código (serviços de Pagamento, Migração A
 * Assinaturas de pacote sempre respeitam o domínio (`planType`, `duration`, `isActive`).
 * Migrados da ASAAS são normalizados sem depender de novos scripts manuais.
 
+---
+
+## 11. Cancelar Plano x Remover Cliente (Histórico de Plano)
+
+Esta seção documenta explicitamente a diferença entre:
+
+1. Cancelar o plano (ação de negócio do cliente, mantendo uso até o fim do período pago).
+2. Remover o cliente do plano (ação administrativa para limpar histórico – testes, migrações, sujeira).
+
+### 11.1. Conceitos
+
+* Plano pacote: `Plan.isPackage = TRUE` (ex.: Topzeira Mensal, `Plan.id = 6`).
+* Assinatura (`Subscription`): controla ciclo de uso (datas, status, vínculo com carro).
+* Pagamento (`Payment`): registro financeiro, fonte de verdade do que foi pago.
+
+Dois tipos de ação:
+
+1. **Cancelar plano** (cliente não quer renovar, mas já pagou o ciclo atual).
+2. **Remover cliente do plano** (admin limpa tudo para aquele plano, inclusive histórico).
+
+---
+
+### 11.2. Cancelar Plano (ação do cliente)
+
+Objetivo: o cliente não quer ser renovado para próximos ciclos, mas ainda tem direito de uso até o fim do período já pago (exemplo: plano contratado em 20/11, válido por 30 dias; se cancelar em 22/11, continua com acesso até ~20/12).
+
+Regras de negócio:
+
+1. Nenhum histórico é apagado.
+
+    * Linhas de `Payment` permanecem.
+    * Linhas de `Subscription` permanecem.
+
+2. A assinatura do ciclo atual é marcada como cancelada, mas continua utilizável até o fim da validade:
+
+    * `subscriptionStatus = 'CANCELED'`
+    * `isActive` deve refletir a janela de uso:
+
+        * Enquanto `expiresAt >= NOW()`:
+
+            * `isActive = TRUE`
+            * Cliente ainda consegue usar o plano normalmente.
+        * Quando `expiresAt < NOW()`:
+
+            * `isActive = FALSE`
+            * Plano deixa de ser utilizável.
+
+3. `startDate` e `expiresAt` não mudam no momento do cancelamento; continuam representando exatamente o ciclo pago.
+
+4. Exemplo prático (caso Eduardo, cancelamento):
+
+   Após rodar o `UPDATE` de cancelamento da assinatura “boa”:
+
+   ```sql
+   UPDATE "Subscription"
+   SET
+     "subscriptionStatus" = 'CANCELED',
+     "isActive" = TRUE,           -- ainda dentro do prazo
+     "updatedAt" = NOW()
+   WHERE "id" = 45;
+   ```
+
+   A tabela passou a mostrar:
+
+   ```text
+    id | userId | planId | subscriptionStatus | isActive |        startDate        |        expiresAt        
+   ----+--------+--------+--------------------+----------+-------------------------+-------------------------
+    45 |    102 |      6 | CANCELED           | t        | 2025-11-29 08:27:18.152 | 2025-12-29 08:27:18.152
+   ```
+
+   Interpretação:
+
+    * O plano está “cancelado” para renovação futura (`subscriptionStatus = 'CANCELED'`).
+    * Mas ainda está “ativo” do ponto de vista de uso até `2025-12-29 08:27:18.152` (`isActive = TRUE` enquanto `expiresAt >= NOW()`).
+    * Na UI, isso pode ser exibido como:
+
+        * “Plano cancelado – válido até 29/12/2025”.
+
+5. Regra geral para cancelamento (serviço de domínio):
+
+   Ao cancelar:
+
+    * Atualizar a assinatura do ciclo vigente do plano pacote para:
+
+      ```sql
+      UPDATE "Subscription"
+      SET
+        "subscriptionStatus" = 'CANCELED',
+        "updatedAt" = NOW(),
+        "isActive" = ("expiresAt" IS NOT NULL AND "expiresAt" >= NOW())
+      WHERE "id" = :subscriptionId;
+      ```
+
+    * Não tocar em `Payment`.
+
+    * Não deletar `Subscription`.
+
+Resumo:
+
+* Cancelar plano:
+
+    * Não remove linhas.
+    * Mantém histórico financeiro (Payment) e de uso (Subscription).
+    * Garante acesso até `expiresAt`.
+    * Após `expiresAt`, `isActive` passa a `FALSE` e a assinatura fica apenas como histórico cancelado.
+
+---
+
+### 11.3. Remover Cliente do Plano (limpar histórico)
+
+Objetivo: “resetar” completamente o cliente para aquele plano, apagando assinaturas e pagamentos relacionados, tipicamente em situações de:
+
+* Testes internos (como ocorreu com o cliente Eduardo, onde foram criadas 11 assinaturas).
+* Erros de migração que geraram sujeira.
+* Reprocessamento completo do histórico daquele plano.
+
+Regras de negócio:
+
+1. Todos os registros de `Subscription` daquele plano para o cliente devem ser removidos:
+
+   ```sql
+   DELETE FROM "Subscription"
+   WHERE "userId" = :userId
+     AND "planId" = :planId;
+   ```
+
+2. Todos os registros de `Payment` daquele plano para o cliente também devem ser removidos:
+
+   ```sql
+   DELETE FROM "Payment"
+   WHERE "userId" = :userId
+     AND "planId" = :planId;
+   ```
+
+3. O cliente (`User`) permanece na base.
+
+    * Carros (`Car`) permanecem na base (não são removidos por esta ação).
+    * O que some é o vínculo histórico do cliente com aquele plano específico (pagamentos + assinaturas).
+
+4. Exemplo prático (caso Eduardo – limpar histórico de testes):
+
+   Antes da limpeza, o cliente Eduardo (`userId = 102`, `planId = 6`) tinha 11+ assinaturas/linhas, por múltiplos testes.
+
+   A limpeza foi feita com:
+
+   ```sql
+   BEGIN;
+
+   DELETE FROM "Subscription"
+   WHERE "userId" = 102
+     AND "planId" = 6;
+
+   DELETE FROM "Payment"
+   WHERE "userId" = 102
+     AND "planId" = 6;
+
+   COMMIT;
+   ```
+
+   Após isso:
+
+   ```sql
+   SELECT
+     s."id",
+     s."userId",
+     s."planId",
+     s."subscriptionStatus",
+     s."isActive",
+     s."startDate",
+     s."expiresAt"
+   FROM "Subscription" s
+   WHERE s."userId" = 102
+     AND s."planId" = 6
+   ORDER BY s."id";
+   ```
+
+   Retorno:
+
+   ```text
+    id | userId | planId | subscriptionStatus | isActive | startDate | expiresAt 
+   ----+--------+--------+--------------------+----------+-----------+-----------
+   (0 rows)
+   ```
+
+   E para `Payment`:
+
+   ```sql
+   SELECT
+     p."id",
+     p."userId",
+     p."planId",
+     p."status",
+     p."amount",
+     p."paymentDate"
+   FROM "Payment" p
+   WHERE p."userId" = 102
+     AND p."planId" = 6
+   ORDER BY p."id";
+   ```
+
+   Retorno:
+
+   ```text
+    id | userId | planId | status | amount | paymentDate 
+   ----+--------+--------+--------+--------+-------------
+   (0 rows)
+   ```
+
+   Interpretação:
+
+    * O cliente continua existindo, com seu cadastro e carros.
+    * Mas, para o `planId = 6`, não há mais nenhum histórico de pagamento ou assinatura.
+    * Na UI, “Meus Planos” não exibe nada desse plano para este usuário; é como se ele nunca tivesse aderido ao Topzeira.
+
+Resumo:
+
+* Remover cliente do plano:
+
+    * Apaga histórico completo de `Subscription` e `Payment` para aquele `planId`.
+    * Não é uma ação normal de usuário final; é ação de suporte/admin.
+    * Uso típico para correção de dados, testes, migração.
+
+---
+
+### 11.4. Comparativo direto: Cancelar x Remover
+
+1. **Cancelar plano (cliente)**
+
+    * Mantém histórico financeiro.
+    * Mantém histórico de assinaturas.
+    * Marca:
+
+        * `subscriptionStatus = 'CANCELED'`.
+        * `isActive`:
+
+            * `TRUE` até `expiresAt`.
+            * `FALSE` após `expiresAt`.
+    * Cliente ainda pode utilizar o plano até o fim do período já pago.
+    * Útil para fluxo padrão de “quero parar de renovar, mas já paguei este mês”.
+
+2. **Remover cliente do plano (admin)**
+
+    * Remove todas as `Subscription` para `(userId, planId)`.
+    * Remove todos os `Payment` para `(userId, planId)`.
+    * “Zera” o cliente para aquele plano (sem rastro desse plano na base para ele).
+    * Útil para:
+
+        * Limpar casos de teste (como o cliente Eduardo, com várias assinaturas criadas e removidas).
+        * Corrigir migrações erradas, permitindo reprocessar tudo do zero.
+
+---
+
+### 11.5. Integração com as Regras de Serviço
+
+Para manter esta lógica consistente no código:
+
+1. **Serviço de Pagamentos / Assinaturas**
+
+    * Deve expor uma operação de “cancelar plano” que:
+
+        * Localiza a `Subscription` ativa do ciclo atual para `(userId, planId, carId)`.
+        * Atualiza `subscriptionStatus = 'CANCELED'`.
+        * Mantém `startDate`, `expiresAt` e `amount`.
+        * Recalcula `isActive` com base em `expiresAt`.
+
+2. **Painel Administrativo / Serviço Interno**
+
+    * Deve expor uma operação de “remover cliente do plano” que:
+
+        * Executa as duas deleções em transação:
+
+            * `DELETE FROM "Subscription" ...`
+            * `DELETE FROM "Payment" ...`
+        * Opcionalmente registra log interno do motivo da remoção (ex.: “limpeza de histórico de teste”, “correção de migração”).
+
+3. **UI – Experiência do Usuário**
+
+    * Para o cliente final:
+
+        * Exibir botão “Cancelar plano”, nunca “Remover”.
+        * Ao cancelar, mostrar claramente:
+
+            * “Seu plano foi cancelado, mas permanece válido até DD/MM/AAAA.”
+    * Para o admin/suporte:
+
+        * Exibir ação “Remover histórico do plano” apenas em painel restrito.
+        * Deixar claro que essa ação apaga todo o histórico de pagamentos e assinaturas daquele plano para o cliente.
+
+Com isso, a base de dados e a interface passam a refletir de forma consistente:
+
+* O direito de uso até o fim do período pago (via cancelamento).
+* A necessidade de limpeza completa em cenários de teste/migração (via remoção).
+
+---
+
+## 12. Nova Problemática – Pagamento Confirmado, Subscription Existente, Plano Não Ativo (Webhook Ausente)
+
+### 12.1. Sintoma
+
+Cenário observado em um novo teste com o mesmo cliente (Eduardo):
+
+1. O cliente fez um novo pagamento PIX do plano Topzeira Mensal.
+2. O ASAAS confirmou o pagamento (`status = RECEIVED / CONFIRMED`).
+3. Na base local:
+
+    * `Payment.status = 'PAID'`.
+    * Existe uma `Subscription` para `(userId, planId, carId)`.
+    * Porém, a assinatura não foi ativada (`isActive = FALSE`), e o app não exibiu o plano como ativo na tela.
+
+Ou seja: diferente do caso Léo (em que não havia Subscription), aqui já existia uma Subscription, mas o vínculo `Payment -> Subscription` não foi propagado corretamente quando o webhook não chegou.
+
+### 12.2. Diagnóstico via Logs da API
+
+Primeira análise foi feita diretamente nos logs da API:
+
+1. Filtragem por identificador da função:
+
+    * Buscar por `[paymentWebhook]`.
+    * Buscar por `[handlePaymentWebhook]`.
+    * Buscar por `[updateSubscriptionValidityFromPayment]`.
+
+2. Filtragem pelo `paymentIdAsaas` do pagamento em questão:
+
+    * Exemplo do novo teste:
+
+        * `paymentIdAsaas = 'pay_4i4bc85j391gi0lp'`.
+
+3. Resultado:
+
+    * Não existia nenhum log de `paymentWebhook` nem de `handlePaymentWebhook` para esse pagamento.
+    * Ou seja: o webhook do ASAAS não chegou na API (endpoint errado, indisponibilidade momentânea ou problema de configuração de webhook no ASAAS).
+
+Conclusão: o status `PAID` de `Payment` foi atualizado por outro caminho (sincronização ativa), mas sem chamar `updateSubscriptionValidityFromPayment`.
+
+### 12.3. Diagnóstico via Banco – Payment e Subscription do Novo Teste
+
+Consulta em `Payment` para o novo teste do plano 6 para o usuário 102:
+
+```sql
+SELECT
+  "id",
+  "userId",
+  "planId",
+  "amount",
+  "status",
+  "paymentMethodId",
+  "paymentIdAsaas",
+  "paymentDate",
+  "createdAt",
+  "updatedAt"
+FROM "Payment"
+WHERE "paymentIdAsaas" = 'pay_4i4bc85j391gi0lp';
+```
+
+Resultado:
+
+```text
+ id  | userId | planId | amount | status | paymentMethodId |    paymentIdAsaas    |       paymentDate       |       createdAt        |        updatedAt        
+-----+--------+--------+--------+--------+-----------------+----------------------+-------------------------+------------------------+-------------------------
+ 2675|    102 |      6 |  139.9 | PAID   | PIX             | pay_4i4bc85j391gi0lp | 2025-11-29 13:38:25.514 | 2025-11-29 16:38:27.26 | 2025-11-29 16:39:10.101
+(1 row)
+```
+
+Em seguida, checagem da Subscription criada na mesma janela:
+
+```sql
+SELECT
+  "id",
+  "userId",
+  "planId",
+  "carId",
+  "planType",
+  "isActive",
+  "subscriptionStatus",
+  "startDate",
+  "expiresAt",
+  "subscriptionIdAsaas",
+  "installmentIdAsaas",
+  "createdAt",
+  "updatedAt"
+FROM "Subscription"
+WHERE "userId" = 102
+  AND "planId" = 6
+ORDER BY "createdAt" DESC
+LIMIT 1;
+```
+
+Resultado:
+
+```text
+ id  | userId | planId | carId | planType | isActive | subscriptionStatus |        startDate        |        expiresAt        | endDate | subscriptionIdAsaas | installmentIdAsaas |        createdAt        |        updatedAt        
+-----+--------+--------+-------+----------+----------+--------------------+-------------------------+-------------------------+---------+---------------------+--------------------+-------------------------+-------------------------
+ 108 |    102 |      6 |    10 | MONTH    | f        | ACTIVE             | 2025-11-29 16:38:25.514 | 2025-12-29 13:38:25.514 |         |                     |                    | 2025-11-29 16:38:25.515 | 2025-11-29 16:38:25.515
+(1 row)
+```
+
+Observações:
+
+* `subscriptionStatus = 'ACTIVE'`, ou seja, do ponto de vista de status lógico, o sistema marcou a assinatura como ativa.
+* `isActive = false`, ou seja, do ponto de vista de uso atual, a assinatura foi considerada inativa.
+* `startDate` e `expiresAt` estão coerentes com um ciclo de 30 dias, mas a flag `isActive` não foi recalculada após o pagamento ser confirmado.
+
+Sintoma prático:
+
+* O cliente pagou.
+* Há Payment `PAID`.
+* Há Subscription criada.
+* O plano não aparece como ativo no app porque `isActive = false`.
+
+### 12.4. Causa Raiz
+
+A causa raiz envolve a combinação de dois pontos:
+
+1. **Webhook ASAAS não chegou** para o pagamento `pay_4i4bc85j391gi0lp`.
+
+    * Sem webhook, o fluxo normal:
+
+        * `paymentWebhook` → `handlePaymentWebhook` → `updateSubscriptionValidityFromPayment` → revalida `isActive` e `expiresAt`.
+
+      não foi disparado.
+
+2. **A rotina de sincronização ativa (sem webhook) atualiza apenas `Payment`, não `Subscription`.**
+
+   Isto é, o serviço `PaymentService` possui um método de sincronização como:
+
+   ```ts
+   private async syncPaymentWithAsaasByLocalId(paymentId: number): Promise<void> {
+     const localPayment = await this.paymentRepository.getOneByFilter({ id: paymentId });
+
+     if (!localPayment) { ... }
+
+     if (!localPayment.paymentIdAsaas) { ... }
+
+     if (localPayment.status === "PAID" || localPayment.status === "CANCELED") {
+       return;
+     }
+
+     const asaasPayment = await asaasGetPayment(localPayment.paymentIdAsaas);
+
+     const internalStatusFromAsaas = this.mapAsaasPaymentStatusToInternal(
+       asaasPayment.status as ASAASPaymentStatusEnum,
+     );
+
+     if (internalStatusFromAsaas !== localPayment.status) {
+       await this.paymentRepository.updatePaymentStatus(
+         localPayment.id,
+         internalStatusFromAsaas,
+       );
+       // Faltava: propagar para Subscription
+     }
+   }
+   ```
+
+   Ou seja:
+
+    * O sync corrige o `Payment.status` com base no ASAAS (por exemplo, de `PENDING` para `PAID`).
+    * Porém, não chama `updateSubscriptionValidityFromPayment` para recalcular:
+
+        * `expiresAt`.
+        * `isActive`.
+        * `planType`, se necessário.
+
+Resultado: quando o webhook falha ou está mal configurado, o sistema entra numa “metade de estado”:
+
+* Financeiro (Payment) atualizado.
+* Domínio de assinatura (Subscription) congelado.
+
+### 12.5. Correção Emergencial (SQL) – Ativação Manual da Assinatura
+
+Para corrigir imediatamente o cliente (sem alterar código), foi aplicada uma correção manual na Subscription `id = 108`:
+
+```sql
+UPDATE "Subscription"
+SET
+  "isActive" = TRUE,
+  "subscriptionStatus" = 'ACTIVE',
+  "updatedAt" = NOW()
+WHERE
+  "id" = 108;
+```
+
+Versão mais genérica, baseada em validade, para qualquer assinatura do plano 6 do usuário 102:
+
+```sql
+UPDATE "Subscription"
+SET
+  "isActive" = TRUE,
+  "subscriptionStatus" = 'ACTIVE',
+  "updatedAt" = NOW()
+WHERE
+  "userId" = 102
+  AND "planId" = 6
+  AND "expiresAt" >= NOW();
+```
+
+Após este `UPDATE`, o plano do Eduardo passou a ser exibido corretamente na tela, confirmando que o problema estava apenas na flag `isActive`.
+
+### 12.6. Ação Estrutural – Ajuste de Serviço para Resiliência sem Webhook
+
+Para não depender de correções manuais quando o webhook falhar, a regra de negócio do serviço de pagamentos precisa ser atualizada:
+
+1. **Qualquer fluxo que alterar `Payment.status` com base em consulta ao ASAAS deve também atualizar a Subscription.**
+
+   Em termos de serviço de domínio:
+
+    * O método `syncPaymentWithAsaasByLocalId` (e qualquer outro que sincronize status) precisa:
+
+        1. Detectar mudança de status (`PENDING` → `PAID` ou `CANCELED`).
+        2. Localizar a Subscription relacionada.
+        3. Chamar `updateSubscriptionValidityFromPayment(subscription, paymentDate, newStatus)`.
+
+2. **Localização da Subscription associada ao Payment sem webhook:**
+
+   A associação pode ser feita em três fontes:
+
+    * `asaasPayment.subscription` (assinatura ASAAS).
+    * `asaasPayment.installment` (quando houver `installmentIdAsaas`).
+    * `asaasPayment.externalReference` contendo `subId` (ID local da Subscription).
+
+   Regra proposta:
+
+   ```ts
+   if (internalStatusFromAsaas === "PAID" || internalStatusFromAsaas === "CANCELED") {
+     let subscription: Subscription | null = null;
+
+     // 1) Pelo subscriptionIdAsaas
+     if (asaasPayment.subscription) {
+       subscription = await this.subscriptionRepository.getByAsaasId(
+         asaasPayment.subscription,
+       );
+     }
+
+     // 2) Pelo installmentIdAsaas
+     if (!subscription && asaasPayment.installment) {
+       subscription =
+         await this.subscriptionRepository.getByInstallmentIdAsaas(
+           asaasPayment.installment,
+         );
+     }
+
+     // 3) Pelo subId em externalReference
+     if (!subscription && asaasPayment.externalReference) {
+       try {
+         const externalReference = JSON.parse(
+           asaasPayment.externalReference,
+         ) as { subId?: number };
+
+         if (externalReference.subId) {
+           subscription =
+             await this.subscriptionRepository.findById(
+               externalReference.subId,
+             );
+         }
+       } catch (parseError) {
+         // log de erro de parse
+       }
+     }
+
+     if (subscription) {
+       const paymentDate =
+         asaasPayment.paymentDate !== undefined &&
+         asaasPayment.paymentDate !== null
+           ? new Date(asaasPayment.paymentDate)
+           : new Date();
+
+       await this.updateSubscriptionValidityFromPayment(
+         subscription,
+         paymentDate,
+         internalStatusFromAsaas,
+       );
+     }
+   }
+   ```
+
+3. **Invariantes mantidas após a alteração:**
+
+    * Com webhook:
+
+        * `paymentWebhook` continua sendo o caminho principal.
+        * `handlePaymentWebhook` continua chamando `updateSubscriptionValidityFromPayment`.
+
+    * Sem webhook (fallback):
+
+        * Ao rodar qualquer fluxo de sincronização (por exemplo, ao exibir detalhes de pagamento ou ao rodar uma rotina de “health check” dos pagamentos), o sistema:
+
+            * Atualiza `Payment.status` com base no ASAAS.
+            * Atualiza a Subscription correspondente via `updateSubscriptionValidityFromPayment`.
+
+4. **Benefício direto:**
+
+    * Mesmo que o ASAAS não consiga chamar o webhook por algum motivo (endpoint inválido, queda temporária, firewall), a próxima sincronização ativa:
+
+        * Coloca `Payment.status` como `PAID`.
+        * Calcula `expiresAt` corretamente.
+        * Define `isActive = TRUE` quando dentro da janela.
+        * Garante que o cliente verá o plano como ativo.
+
+### 12.7. Checklist Operacional para Novos Casos
+
+Dado um `paymentIdAsaas` qualquer (por exemplo, `pay_4i4bc85j391gi0lp`), o fluxo de diagnóstico operacional fica registrado:
+
+1. **Log da API:**
+
+    * Filtrar por `[paymentWebhook]` e por `pay_XXXXXXXX`.
+    * Se não houver log:
+
+        * O webhook não chegou.
+        * O problema não está na validação de usuário/plano/cupom.
+
+2. **Banco – Payment:**
+
+   ```sql
+   SELECT
+     "id",
+     "userId",
+     "planId",
+     "amount",
+     "status",
+     "paymentMethodId",
+     "paymentIdAsaas",
+     "paymentDate",
+     "createdAt",
+     "updatedAt"
+   FROM "Payment"
+   WHERE "paymentIdAsaas" = 'pay_XXXXXXXX';
+   ```
+
+    * Confirmar se `status = 'PAID'`.
+    * Confirmar se `planId` está correto.
+
+3. **Banco – Subscription:**
+
+   ```sql
+   SELECT
+     "id",
+     "userId",
+     "planId",
+     "carId",
+     "planType",
+     "isActive",
+     "subscriptionStatus",
+     "startDate",
+     "expiresAt",
+     "subscriptionIdAsaas",
+     "createdAt",
+     "updatedAt"
+   FROM "Subscription"
+   WHERE "userId" = :userId
+     AND "planId" = :planId
+   ORDER BY "createdAt" DESC;
+   ```
+
+    * Se não existir Subscription:
+
+        * É um novo “caso Léo” (precisa criar Subscription baseada no último `Payment.PAID`).
+    * Se existir Subscription, mas:
+
+        * `subscriptionStatus = 'ACTIVE'` e `isActive = FALSE`:
+
+            * É o novo “caso Eduardo sem webhook.”
+
+4. **Correção imediata (enquanto o ajuste de código não estiver em produção):**
+
+    * Aplicar `UPDATE` semelhante ao da seção 12.5 para alinhar `isActive` com `expiresAt` quando houver Payment `PAID` válido.
+
+5. **Correção definitiva (código):**
+
+    * Garantir que qualquer mudança de status em `Payment` acionada por sync também aciona `updateSubscriptionValidityFromPayment`, usando as regras da seção 12.6.
+
+Com esta nova problemática documentada, o histórico completo fica registrado:
+
+* Primeiro, a falha de domínio (planType/isActive/expiresAt/carId).
+* Depois, a falha de migração (caso Léo unitário e em lote).
+* Agora, a falha de propagação de status quando o webhook não chega, corrigida com:
+
+    * Ajuste de SQL emergencial.
+    * Definição clara da alteração necessária no `PaymentService` para sincronizar `Payment` e `Subscription` em qualquer cenário.
