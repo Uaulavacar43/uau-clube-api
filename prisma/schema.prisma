@@ -9,21 +9,37 @@ datasource db {
   schemas  = ["logs", "public"]
 }
 
+// -----------------------------------------------------------------------
+// MODELOS PRINCIPAIS (PUBLIC SCHEMA)
+// -----------------------------------------------------------------------
+
 model User {
-  id                         Int                         @id @default(autoincrement())
-  name                       String
-  email                      String                      @unique
-  password                   String
-  phone                      String
-  cpf                        String?                     @unique
-  role                       Role
-  createdAt                  DateTime                    @default(now())
-  updatedAt                  DateTime                    @updatedAt
-  profileImageUrl            String?
-  otp                        String?
-  firebaseTokens             String[]
-  deletedAt                  DateTime?
-  status                     UserStatus                  @default(ACTIVE)
+  id              Int        @id @default(autoincrement())
+  name            String
+  email           String     @unique
+  password        String
+  phone           String
+  cpf             String?    @unique
+  role            Role
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  profileImageUrl String?
+  otp             String?
+  firebaseTokens  String[]
+  deletedAt       DateTime?
+  status          UserStatus @default(ACTIVE)
+
+  // RELAÇÕES DE INDICAÇÃO (REDE 3 NÍVEIS)
+  referrerId      Int? // O ID do usuário que indicou este usuário (Nível 1 de 'referrer')
+  referrals       User[]          @relation("UserReferrals") // Usuários que este usuário indicou
+  referrer        User?           @relation("UserReferrals", fields: [referrerId], references: [id])
+  referralBonuses ReferralBonus[] @relation("ReceiverToBonus") // Bônus recebidos por este usuário
+
+  // RELAÇÕES DE CASHBACK
+  cashbackWallets      CashbackWallet[]
+  cashbackTransactions CashbackTransaction[]
+
+  // RELAÇÕES OPERACIONAIS EXISTENTES
   requestLogs                RequestLog[]
   webhookLogs                WebhookLog[]
   cars                       Car[]
@@ -36,6 +52,108 @@ model User {
 
   @@schema("public")
 }
+
+// NOVO MODELO: CARTEIRA DE CASHBACK (INTERNO E ALLOYAL)
+model CashbackWallet {
+  id        Int        @id @default(autoincrement())
+  userId    Int
+  type      WalletType @default(INTERNAL) // INTERNO ou ALLOYAL
+  balance   Float      @default(0.0)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, type])
+  @@schema("public")
+}
+
+// NOVO MODELO: REGISTRO DE TRANSAÇÕES DE CASHBACK
+model CashbackTransaction {
+  id        Int               @id @default(autoincrement())
+  userId    Int
+  type      TransactionType // EARNED (ganho) ou USED (usado)
+  source    TransactionSource // INDICATION, PARTNER_LOCAL, ALLOYAL, SUBSCRIPTION_DEBIT
+  amount    Float
+  relatedId String? // Pode ser paymentIdAsaas, subscriptionId, partnerId, etc.
+  createdAt DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@schema("public")
+}
+
+// NOVO MODELO: BÔNUS DE INDICAÇÃO
+model ReferralBonus {
+  id            Int           @id @default(autoincrement())
+  receiverId    Int // Quem recebe o bônus
+  payerId       Int // O usuário que gerou a assinatura/pagamento
+  level         Int // 1, 2, ou 3
+  type          BonusType // UNIQUE ou RECURRENT
+  amount        Float
+  paymentStatus PaymentStatus @default(PENDING) // Reflete se o bônus foi pago/creditado
+  createdAt     DateTime      @default(now())
+
+  receiver User @relation("ReceiverToBonus", fields: [receiverId], references: [id])
+
+  @@schema("public")
+}
+
+// -----------------------------------------------------------------------
+// MODELOS EXISTENTES CORRIGIDOS/EXPANDIDOS
+// -----------------------------------------------------------------------
+
+model Plan {
+  id              Int             @id @default(autoincrement())
+  name            String          @unique
+  price           Float
+  duration        Int
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @default(now())
+  description     String?
+  isBestChoice    Boolean         @default(false)
+  periodicityType PeriodicityType @default(MONTH)
+  isPackage       Boolean         @default(false)
+  extraMonths     Int?
+
+  maxInstallments Int? @default(0)
+
+  payments      Payment[]
+  subscriptions Subscription[]
+  coupons       Coupon[]       @relation("CouponToPlan")
+  washServices  WashService[]  @relation("PlansToWashServices")
+
+  @@schema("public")
+}
+
+model Payment {
+  id                 Int           @id @default(autoincrement())
+  userId             Int
+  amount             Float
+  paymentDate        DateTime      @default(now())
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  status             PaymentStatus @default(PENDING)
+  paymentMethodId    String?
+  planId             Int?
+  paymentIdAsaas     String?
+  couponId           Int?
+  pixPayload         String?
+  pixQrCode          String?
+  installments       Int?
+  cashbackUsedAmount Float?
+
+  webhookLogs                WebhookLog[]
+  individualServicePurchases IndividualServicePurchase[]
+  coupon                     Coupon?                     @relation(fields: [couponId], references: [id])
+  plan                       Plan?                       @relation(fields: [planId], references: [id])
+  user                       User                        @relation(fields: [userId], references: [id])
+
+  @@schema("public")
+}
+
+// MODELOS EXISTENTES MANTIDOS
+// (Os modelos de Location, Service, Car e outros permanecem inalterados.)
 
 model WashLocation {
   id             Int                    @id @default(autoincrement())
@@ -77,7 +195,7 @@ model WashLocationFavorite {
 
 model WashService {
   id                         Int                         @id @default(autoincrement())
-  name                       String
+  name                       String                      @unique
   price                      Float
   imageUrl                   String
   isAvailable                Boolean                     @default(true)
@@ -90,26 +208,6 @@ model WashService {
   admin                      User                        @relation("AdminToWashServices", fields: [adminId], references: [id])
   coupons                    Coupon[]                    @relation("CouponToWashService")
   plans                      Plan[]                      @relation("PlansToWashServices")
-
-  @@schema("public")
-}
-
-model Plan {
-  id              Int             @id @default(autoincrement())
-  name            String
-  price           Float
-  duration        Int
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @default(now())
-  description     String?
-  isBestChoice    Boolean         @default(false)
-  periodicityType PeriodicityType @default(MONTH)
-  isPackage       Boolean         @default(false)
-  extraMonths     Int?
-  payments        Payment[]
-  subscriptions   Subscription[]
-  coupons         Coupon[]        @relation("CouponToPlan")
-  washServices    WashService[]   @relation("PlansToWashServices")
 
   @@schema("public")
 }
@@ -158,50 +256,27 @@ model Car {
 }
 
 model Subscription {
-  id                  Int       @id @default(autoincrement())
+  id                  Int                @id @default(autoincrement())
   userId              Int
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
   carId               Int?
   expiresAt           DateTime?
-  isActive            Boolean   @default(true)
+  isActive            Boolean            @default(true)
+  subscriptionStatus  SubscriptionStatus @default(ACTIVE)
   endDate             DateTime?
   startDate           DateTime
-  amount              Float     @default(0.0)
+  amount              Float              @default(0.0)
   planType            String
   paymentMethod       String?
   planId              Int?
   subscriptionIdAsaas String?
   installmentIdAsaas  String?
   couponId            Int?
-  car                 Car?      @relation(fields: [carId], references: [id])
-  coupon              Coupon?   @relation(fields: [couponId], references: [id])
-  plan                Plan?     @relation(fields: [planId], references: [id])
-  user                User      @relation(fields: [userId], references: [id])
-
-  @@schema("public")
-}
-
-model Payment {
-  id                         Int                         @id @default(autoincrement())
-  userId                     Int
-  amount                     Float
-  paymentDate                DateTime                    @default(now())
-  createdAt                  DateTime                    @default(now())
-  updatedAt                  DateTime                    @updatedAt
-  status                     PaymentStatus               @default(PENDING)
-  paymentMethodId            String?
-  planId                     Int?
-  paymentIdAsaas             String?
-  couponId                   Int?
-  pixPayload                 String?
-  pixQrCode                  String?
-  installments               Int?
-  webhookLogs                WebhookLog[]
-  individualServicePurchases IndividualServicePurchase[]
-  coupon                     Coupon?                     @relation(fields: [couponId], references: [id])
-  plan                       Plan?                       @relation(fields: [planId], references: [id])
-  user                       User                        @relation(fields: [userId], references: [id])
+  car                 Car?               @relation(fields: [carId], references: [id])
+  coupon              Coupon?            @relation(fields: [couponId], references: [id])
+  plan                Plan?              @relation(fields: [planId], references: [id])
+  user                User               @relation(fields: [userId], references: [id])
 
   @@schema("public")
 }
@@ -241,7 +316,7 @@ model IndividualServicePurchase {
   status        PurchaseStatus @default(PENDING)
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
-  paymentId     Int
+  paymentId     Int            @unique
   payment       Payment        @relation(fields: [paymentId], references: [id])
   user          User           @relation(fields: [userId], references: [id])
   washService   WashService    @relation(fields: [washServiceId], references: [id])
@@ -286,10 +361,14 @@ model Coupon {
   @@schema("public")
 }
 
+// -----------------------------------------------------------------------
+// LOGS SCHEMA MANTIDO
+// -----------------------------------------------------------------------
+
 model RequestLog {
   id        Int          @id @default(autoincrement())
   userId    Int?
-  requestId String?      @unique // uuid para identificar no response
+  requestId String?      @unique
   method    String
   path      String
   query     Json?
@@ -347,6 +426,10 @@ model WebhookLog {
   @@schema("logs")
 }
 
+// -----------------------------------------------------------------------
+// ENUMS
+// -----------------------------------------------------------------------
+
 enum UserStatus {
   ACTIVE
   INACTIVE
@@ -397,8 +480,9 @@ enum PurchaseStatus {
 }
 
 enum SubscriptionStatus {
-  active
-  inactive
+  ACTIVE
+  SUSPENDED
+  CANCELED
 
   @@schema("public")
 }
@@ -406,6 +490,37 @@ enum SubscriptionStatus {
 enum DiscountType {
   PERCENTAGE
   FIXED
+
+  @@schema("public")
+}
+
+enum WalletType {
+  INTERNAL
+  ALLOYAL
+
+  @@schema("public")
+}
+
+enum BonusType {
+  UNIQUE
+  RECURRENT
+
+  @@schema("public")
+}
+
+enum TransactionType {
+  EARNED
+  USED
+
+  @@schema("public")
+}
+
+enum TransactionSource {
+  INDICATION
+  PARTNER_LOCAL
+  ALLOYAL
+  SUBSCRIPTION_DEBIT
+  QR_REDEMPTION
 
   @@schema("public")
 }
