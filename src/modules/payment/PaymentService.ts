@@ -808,6 +808,258 @@ export class PaymentService {
         return true;
     }
 
+    /**
+     * Busca o último pagamento PAID com planId para o usuário.
+     * Usa o repositório com filtro por userId e filtra status em memória,
+     * para não depender de um campo "status" no PaymentFilter.
+     */
+
+    private async findLastPaidPlanPaymentForUser(
+        userId: number,
+    ): Promise<Payment | null> {
+        try {
+            // 1) Busca todos os pagamentos do usuário, já ordenados por createdAt desc
+            const payments = await this.paymentRepository.getAll({ userId });
+
+            if (payments.length === 0) {
+                console.log(
+                    `[findLastPaidPlanPaymentForUser] Nenhum pagamento encontrado para userId=${userId}.`,
+                );
+                return null;
+            }
+
+            // 2) Encontra o primeiro pagamento que:
+            //    - está PAID
+            //    - tem planId definido (é pagamento de plano, não avulso)
+            const lastPaidWithPlan = payments.find(
+                (paymentItem) =>
+                    paymentItem.status === "PAID" &&
+                    paymentItem.planId !== undefined &&
+                    paymentItem.planId !== null,
+            );
+
+            if (!lastPaidWithPlan) {
+                console.log(
+                    `[findLastPaidPlanPaymentForUser] Nenhum pagamento PAID com plano encontrado para userId=${userId}.`,
+                );
+                return null;
+            }
+
+            return lastPaidWithPlan;
+        } catch (error) {
+            console.error(
+                `[findLastPaidPlanPaymentForUser] Erro ao buscar pagamento PAID para userId=${userId}:`,
+                error,
+            );
+            return null;
+        }
+    }
+
+
+    /**
+     * Regra completa para casos importados do ASAAS (tipo Leo) ao adicionar carro:
+     *
+     * - Se já existir assinatura vinculada à placa, garante carId e, se necessário,
+     *   recalcula validade com base no último pagamento PAID do usuário.
+     * - Se não existir por placa, tenta achar assinatura ativa do usuário sem carro e vincula.
+     * - Se ainda assim não encontrar, procura o último pagamento PAID com plano, cria/atualiza
+     *   a assinatura e vincula ao carro, respeitando a validade (em dia ou expirado).
+     */
+    public async ensureSubscriptionForUserAndCarFromExistingPayments(
+        userId: number,
+        carId: number,
+    ): Promise<void> {
+        const car = await this.carRepository.findById(carId);
+
+        if (!car) {
+            console.warn(
+                `[ensureSubscriptionForUserAndCarFromExistingPayments] Carro ${carId} não encontrado para userId=${userId}.`,
+            );
+            return;
+        }
+
+        const normalizedPlate = car.licensePlate.trim().toUpperCase();
+
+        const subscriptionByPlate =
+            await this.subscriptionRepository.findByCarLicensePlate(
+                normalizedPlate,
+            );
+
+        if (subscriptionByPlate) {
+            if (
+                subscriptionByPlate.carId === undefined ||
+                subscriptionByPlate.carId === null
+            ) {
+                subscriptionByPlate.carId = carId;
+
+                await this.subscriptionRepository.update(
+                    subscriptionByPlate.id,
+                    subscriptionByPlate,
+                );
+
+                console.log(
+                    `[ensureSubscriptionForUserAndCarFromExistingPayments] Assinatura ${subscriptionByPlate.id} vinculada ao carro ${carId} pela placa ${normalizedPlate}.`,
+                );
+            }
+
+            if (
+                subscriptionByPlate.isActive === false ||
+                subscriptionByPlate.subscriptionStatus !== "ACTIVE"
+            ) {
+                const lastPaidPayment =
+                    await this.findLastPaidPlanPaymentForUser(userId);
+
+                if (
+                    lastPaidPayment &&
+                    lastPaidPayment.planId === subscriptionByPlate.planId
+                ) {
+                    const paymentDate =
+                        lastPaidPayment.paymentDate ??
+                        lastPaidPayment.createdAt ??
+                        new Date();
+
+                    await this.updateSubscriptionValidityFromPayment(
+                        subscriptionByPlate,
+                        paymentDate,
+                        "PAID",
+                    );
+
+                    await this.subscriptionRepository.update(
+                        subscriptionByPlate.id,
+                        subscriptionByPlate,
+                    );
+                }
+            }
+
+            return;
+        }
+
+        const userSubscriptions =
+            await this.subscriptionRepository.findByUserId(userId, true);
+
+        const activeSubscriptionWithoutCar = userSubscriptions.find(
+            (subscriptionItem) =>
+                subscriptionItem.isActive === true &&
+                (subscriptionItem.carId === undefined ||
+                    subscriptionItem.carId === null),
+        );
+
+        if (activeSubscriptionWithoutCar) {
+            activeSubscriptionWithoutCar.carId = carId;
+
+            await this.subscriptionRepository.update(
+                activeSubscriptionWithoutCar.id,
+                activeSubscriptionWithoutCar,
+            );
+
+            console.log(
+                `[ensureSubscriptionForUserAndCarFromExistingPayments] Assinatura ativa ${activeSubscriptionWithoutCar.id} vinculada ao carro ${carId} para o usuário ${userId}.`,
+            );
+
+            return;
+        }
+
+        const lastPaidPayment =
+            await this.findLastPaidPlanPaymentForUser(userId);
+
+        if (
+            !lastPaidPayment ||
+            lastPaidPayment.planId === undefined ||
+            lastPaidPayment.planId === null
+        ) {
+            console.log(
+                `[ensureSubscriptionForUserAndCarFromExistingPayments] Nenhum pagamento PAID com plano encontrado para userId=${userId}. Nenhuma assinatura será criada.`,
+            );
+            return;
+        }
+
+        const plan = await this.planRepository.findById(lastPaidPayment.planId);
+        if (!plan) {
+            console.warn(
+                `[ensureSubscriptionForUserAndCarFromExistingPayments] Plano ${lastPaidPayment.planId} não encontrado para userId=${userId}.`,
+            );
+            return;
+        }
+
+        const paymentDate =
+            lastPaidPayment.paymentDate ??
+            lastPaidPayment.createdAt ??
+            new Date();
+
+        let subscriptionForPlan = userSubscriptions.find(
+            (subscriptionItem) => subscriptionItem.planId === plan.id,
+        );
+
+        if (subscriptionForPlan) {
+            subscriptionForPlan.carId = carId;
+
+            await this.updateSubscriptionValidityFromPayment(
+                subscriptionForPlan,
+                paymentDate,
+                "PAID",
+            );
+
+            await this.subscriptionRepository.update(
+                subscriptionForPlan.id,
+                subscriptionForPlan,
+            );
+
+            console.log(
+                `[ensureSubscriptionForUserAndCarFromExistingPayments] Assinatura existente ${subscriptionForPlan.id} atualizada a partir do pagamento e vinculada ao carro ${carId}.`,
+            );
+
+            return;
+        }
+
+        const expiresAt = this.calculatePlanExpiration(plan, paymentDate);
+        const now = new Date();
+        const isActive = expiresAt.getTime() >= now.getTime();
+
+        const paymentMethodSafe: string =
+            lastPaidPayment.paymentMethodId &&
+            lastPaidPayment.paymentMethodId.trim().length > 0
+                ? lastPaidPayment.paymentMethodId
+                : "UNKNOWN";
+
+        const subscription = new Subscription({
+            userId,
+            planId: plan.id,
+            planType: plan.periodicityType,
+            amount: lastPaidPayment.amount,
+            isActive,
+            startDate: paymentDate,
+            carId,
+            expiresAt,
+            paymentMethod: paymentMethodSafe,
+            couponId: lastPaidPayment.couponId ?? null,
+            subscriptionStatus: isActive ? "ACTIVE" : "SUSPENDED",
+            endDate: isActive ? null : expiresAt,
+            subscriptionIdAsaas: null,
+        });
+
+        const createdSubscription =
+            await this.subscriptionRepository.create(subscription);
+
+        console.log(
+            `[ensureSubscriptionForUserAndCarFromExistingPayments] Nova assinatura ${createdSubscription.id} criada a partir do pagamento PAID e vinculada ao carro ${carId}. isActive=${createdSubscription.isActive}, expiresAt=${createdSubscription.expiresAt?.toISOString()}`,
+        );
+    }
+
+    /**
+     * Wrapper para manter compatibilidade com chamadas existentes:
+     * ao adicionar o carro, aplica a regra completa baseada em pagamentos
+     * e assinaturas existentes (incluindo caso Leo).
+     */
+    public async ensureSubscriptionWhenCarAdded(
+        userId: number,
+        carId: number,
+    ): Promise<void> {
+        await this.ensureSubscriptionForUserAndCarFromExistingPayments(
+            userId,
+            carId,
+        );
+    }
+
     private async createAsaasSubscription(
         data: CreateSubscriptionToPlanDTO & { userId: number },
         plan: Plan,
@@ -1306,12 +1558,12 @@ export class PaymentService {
             );
 
             const paymentMethodIdFromBody =
-                body.payment.billingType ?? null;
+                body.payment.billingType ?? undefined;
 
-            const paymentMethodId =
+            const paymentMethodId: string =
                 paymentMethodIdFromBody ??
                 existingPayment?.paymentMethodId ??
-                null;
+                "UNKNOWN";
 
             const ensuredUserId = userId as number;
             const normalizedPlanId = planId ?? null;
@@ -1398,7 +1650,11 @@ export class PaymentService {
     private calculatePlanExpiration(plan: Plan, referenceDate: Date): Date {
         const baseDate = new Date(referenceDate.getTime());
 
-        if (plan.duration !== undefined && plan.duration !== null && plan.duration > 0) {
+        if (
+            plan.duration !== undefined &&
+            plan.duration !== null &&
+            plan.duration > 0
+        ) {
             baseDate.setDate(baseDate.getDate() + plan.duration);
         } else {
             switch (plan.periodicityType) {
