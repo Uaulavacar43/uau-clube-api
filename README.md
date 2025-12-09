@@ -542,4 +542,15 @@ POST /washes/use
 
 ---
 
+gcloud run deploy uau-clube-api \                                                                                                                                       
+--image=us-central1-docker.pkg.dev/metal-music-479113-v9/uau/uau-clube-api:latest \
+--region=us-central1 \
+--project=metal-music-479113-v9 \
+--allow-unauthenticated \
+--env-vars-file=cloudrun.env.yaml
+
+
+✗ gcloud builds submit \                                                                                                                                                  
+--tag us-central1-docker.pkg.dev/metal-music-479113-v9/uau/uau-clube-api:latest \  
+--gcs-source-staging-dir=gs://uau-clube-build-source/source
 
