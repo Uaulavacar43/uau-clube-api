@@ -238,16 +238,17 @@ model OpeningHour {
 }
 
 model Car {
-  id            Int            @id @default(autoincrement())
-  model         String
-  plate         String
-  userId        Int
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @default(now())
-  brand         String
-  color         String
-  year          Int
-  deletedAt     DateTime?
+  id           Int       @id @default(autoincrement())
+  model        String
+  licensePlate String    @map("plate")
+  userId       Int
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now())
+  brand        String
+  color        String
+  year         Int
+  deletedAt    DateTime?
+
   user          User           @relation(fields: [userId], references: [id])
   dailyWashes   DailyWash[]
   subscriptions Subscription[]

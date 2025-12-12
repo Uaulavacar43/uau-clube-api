@@ -21,10 +21,10 @@ export class UserCarController {
 				throw new AppError("Usuário não autenticado", 401);
 			}
 
-			// Check if this is an admin creating a car for another user
 			let targetUserId = authenticatedUserId;
+
+			// Admin pode cadastrar carro para outro usuário
 			if (data.userId && data.userId !== authenticatedUserId) {
-				// Verify admin role before allowing to create car for another user
 				if (req.user?.role !== "ADMIN") {
 					throw new AppError(
 						"Apenas administradores podem criar carros para outros usuários",
@@ -62,30 +62,24 @@ export class UserCarController {
 				return res.status(401).customJson({ error: "Não autorizado" });
 			}
 
-			// Check if this is an admin creating a car for another user
 			let targetUserId = req.user.id;
+
+			// Admin pode editar carro de outro user (se seu DTO permitir userId)
 			if (data.userId && data.userId !== req.user.id) {
-				// Verify admin role before allowing to create car for another user
 				if (req.user?.role !== "ADMIN") {
 					throw new AppError(
-						"Apenas administradores podem criar carros para outros usuários",
+						"Apenas administradores podem atualizar carros de outros usuários",
 						403,
 					);
 				}
 				targetUserId = data.userId;
 			}
 
-			if (req.user?.role !== "ADMIN" && data.licensePlate) {
-				throw new AppError(
-					"Apenas administradores podem atualizar a placa",
-					403,
-				);
-			}
-
 			const updatedCar = await this.userCarService.updateCar(data, {
 				id: targetUserId,
-				role: req.user?.role,
+				role: req.user.role,
 			});
+
 			return res.status(200).customJson(updatedCar);
 		} catch (error) {
 			next(error);
@@ -95,6 +89,7 @@ export class UserCarController {
 	public async deleteCar(req: Request, res: Response, next: NextFunction) {
 		try {
 			const data = res.locals as DeleteUserCarDTO;
+
 			if (!req.user) {
 				throw new AppError("Não autorizado", 401);
 			}

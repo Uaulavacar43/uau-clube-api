@@ -7,7 +7,7 @@ Dockerfile
 dist
 credentials/*.json
 .env
-.env.*
+.env
 .idea
 .vscode
 coverage

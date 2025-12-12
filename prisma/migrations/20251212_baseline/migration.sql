@@ -23,10 +23,22 @@ CREATE TYPE "public"."Role" AS ENUM ('ADMIN', 'USER', 'MANAGER');
 CREATE TYPE "public"."PurchaseStatus" AS ENUM ('PENDING', 'COMPLETED', 'CANCELED');
 
 -- CreateEnum
-CREATE TYPE "public"."SubscriptionStatus" AS ENUM ('active', 'inactive');
+CREATE TYPE "public"."SubscriptionStatus" AS ENUM ('ACTIVE', 'SUSPENDED', 'CANCELED');
 
 -- CreateEnum
 CREATE TYPE "public"."DiscountType" AS ENUM ('PERCENTAGE', 'FIXED');
+
+-- CreateEnum
+CREATE TYPE "public"."WalletType" AS ENUM ('INTERNAL', 'ALLOYAL');
+
+-- CreateEnum
+CREATE TYPE "public"."BonusType" AS ENUM ('UNIQUE', 'RECURRENT');
+
+-- CreateEnum
+CREATE TYPE "public"."TransactionType" AS ENUM ('EARNED', 'USED');
+
+-- CreateEnum
+CREATE TYPE "public"."TransactionSource" AS ENUM ('INDICATION', 'PARTNER_LOCAL', 'ALLOYAL', 'SUBSCRIPTION_DEBIT', 'QR_REDEMPTION');
 
 -- CreateTable
 CREATE TABLE "public"."User" (
@@ -44,8 +56,87 @@ CREATE TABLE "public"."User" (
     "firebaseTokens" TEXT[],
     "deletedAt" TIMESTAMP(3),
     "status" "public"."UserStatus" NOT NULL DEFAULT 'ACTIVE',
+    "referrerId" INTEGER,
 
     CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "public"."CashbackWallet" (
+    "id" SERIAL NOT NULL,
+    "userId" INTEGER NOT NULL,
+    "type" "public"."WalletType" NOT NULL DEFAULT 'INTERNAL',
+    "balance" DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "CashbackWallet_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "public"."CashbackTransaction" (
+    "id" SERIAL NOT NULL,
+    "userId" INTEGER NOT NULL,
+    "type" "public"."TransactionType" NOT NULL,
+    "source" "public"."TransactionSource" NOT NULL,
+    "amount" DOUBLE PRECISION NOT NULL,
+    "relatedId" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "CashbackTransaction_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "public"."ReferralBonus" (
+    "id" SERIAL NOT NULL,
+    "receiverId" INTEGER NOT NULL,
+    "payerId" INTEGER NOT NULL,
+    "level" INTEGER NOT NULL,
+    "type" "public"."BonusType" NOT NULL,
+    "amount" DOUBLE PRECISION NOT NULL,
+    "paymentStatus" "public"."PaymentStatus" NOT NULL DEFAULT 'PENDING',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "ReferralBonus_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "public"."Plan" (
+    "id" SERIAL NOT NULL,
+    "name" TEXT NOT NULL,
+    "price" DOUBLE PRECISION NOT NULL,
+    "duration" INTEGER NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "description" TEXT,
+    "isBestChoice" BOOLEAN NOT NULL DEFAULT false,
+    "periodicityType" "public"."PeriodicityType" NOT NULL DEFAULT 'MONTH',
+    "isPackage" BOOLEAN NOT NULL DEFAULT false,
+    "extraMonths" INTEGER,
+    "maxInstallments" INTEGER DEFAULT 0,
+
+    CONSTRAINT "Plan_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "public"."Payment" (
+    "id" SERIAL NOT NULL,
+    "userId" INTEGER NOT NULL,
+    "amount" DOUBLE PRECISION NOT NULL,
+    "paymentDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "status" "public"."PaymentStatus" NOT NULL DEFAULT 'PENDING',
+    "paymentMethodId" TEXT,
+    "planId" INTEGER,
+    "paymentIdAsaas" TEXT,
+    "couponId" INTEGER,
+    "pixPayload" TEXT,
+    "pixQrCode" TEXT,
+    "installments" INTEGER,
+    "cashbackUsedAmount" DOUBLE PRECISION,
+
+    CONSTRAINT "Payment_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -97,23 +188,6 @@ CREATE TABLE "public"."WashService" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."Plan" (
-    "id" SERIAL NOT NULL,
-    "name" TEXT NOT NULL,
-    "price" DOUBLE PRECISION NOT NULL,
-    "duration" INTEGER NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "description" TEXT,
-    "isBestChoice" BOOLEAN NOT NULL DEFAULT false,
-    "periodicityType" "public"."PeriodicityType" NOT NULL DEFAULT 'MONTH',
-    "isPackage" BOOLEAN NOT NULL DEFAULT false,
-    "extraMonths" INTEGER,
-
-    CONSTRAINT "Plan_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
 CREATE TABLE "public"."LocationService" (
     "washLocationId" INTEGER NOT NULL,
     "washServiceId" INTEGER NOT NULL,
@@ -161,6 +235,7 @@ CREATE TABLE "public"."Subscription" (
     "carId" INTEGER,
     "expiresAt" TIMESTAMP(3),
     "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "subscriptionStatus" "public"."SubscriptionStatus" NOT NULL DEFAULT 'ACTIVE',
     "endDate" TIMESTAMP(3),
     "startDate" TIMESTAMP(3) NOT NULL,
     "amount" DOUBLE PRECISION NOT NULL DEFAULT 0.0,
@@ -172,26 +247,6 @@ CREATE TABLE "public"."Subscription" (
     "couponId" INTEGER,
 
     CONSTRAINT "Subscription_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "public"."Payment" (
-    "id" SERIAL NOT NULL,
-    "userId" INTEGER NOT NULL,
-    "amount" DOUBLE PRECISION NOT NULL,
-    "paymentDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-    "status" "public"."PaymentStatus" NOT NULL DEFAULT 'PENDING',
-    "paymentMethodId" TEXT,
-    "planId" INTEGER,
-    "paymentIdAsaas" TEXT,
-    "couponId" INTEGER,
-    "pixPayload" TEXT,
-    "pixQrCode" TEXT,
-    "installments" INTEGER,
-
-    CONSTRAINT "Payment_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -273,6 +328,7 @@ CREATE TABLE "public"."Coupon" (
 CREATE TABLE "logs"."RequestLog" (
     "id" SERIAL NOT NULL,
     "userId" INTEGER,
+    "requestId" TEXT,
     "method" TEXT NOT NULL,
     "path" TEXT NOT NULL,
     "query" JSONB,
@@ -351,7 +407,22 @@ CREATE UNIQUE INDEX "User_email_key" ON "public"."User"("email");
 CREATE UNIQUE INDEX "User_cpf_key" ON "public"."User"("cpf");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "CashbackWallet_userId_type_key" ON "public"."CashbackWallet"("userId", "type");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Plan_name_key" ON "public"."Plan"("name");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "WashService_name_key" ON "public"."WashService"("name");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "IndividualServicePurchase_paymentId_key" ON "public"."IndividualServicePurchase"("paymentId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "Coupon_code_key" ON "public"."Coupon"("code");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "RequestLog_requestId_key" ON "logs"."RequestLog"("requestId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ResponseLog_requestId_key" ON "logs"."ResponseLog"("requestId");
@@ -373,6 +444,27 @@ CREATE UNIQUE INDEX "_CouponToWashService_AB_unique" ON "public"."_CouponToWashS
 
 -- CreateIndex
 CREATE INDEX "_CouponToWashService_B_index" ON "public"."_CouponToWashService"("B");
+
+-- AddForeignKey
+ALTER TABLE "public"."User" ADD CONSTRAINT "User_referrerId_fkey" FOREIGN KEY ("referrerId") REFERENCES "public"."User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "public"."CashbackWallet" ADD CONSTRAINT "CashbackWallet_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "public"."CashbackTransaction" ADD CONSTRAINT "CashbackTransaction_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "public"."ReferralBonus" ADD CONSTRAINT "ReferralBonus_receiverId_fkey" FOREIGN KEY ("receiverId") REFERENCES "public"."User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "public"."Payment" ADD CONSTRAINT "Payment_couponId_fkey" FOREIGN KEY ("couponId") REFERENCES "public"."Coupon"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "public"."Payment" ADD CONSTRAINT "Payment_planId_fkey" FOREIGN KEY ("planId") REFERENCES "public"."Plan"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "public"."Payment" ADD CONSTRAINT "Payment_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "public"."WashLocation" ADD CONSTRAINT "WashLocation_managerId_fkey" FOREIGN KEY ("managerId") REFERENCES "public"."User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -409,15 +501,6 @@ ALTER TABLE "public"."Subscription" ADD CONSTRAINT "Subscription_planId_fkey" FO
 
 -- AddForeignKey
 ALTER TABLE "public"."Subscription" ADD CONSTRAINT "Subscription_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "public"."Payment" ADD CONSTRAINT "Payment_couponId_fkey" FOREIGN KEY ("couponId") REFERENCES "public"."Coupon"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "public"."Payment" ADD CONSTRAINT "Payment_planId_fkey" FOREIGN KEY ("planId") REFERENCES "public"."Plan"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "public"."Payment" ADD CONSTRAINT "Payment_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "public"."DailyWash" ADD CONSTRAINT "DailyWash_carId_fkey" FOREIGN KEY ("carId") REFERENCES "public"."Car"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
