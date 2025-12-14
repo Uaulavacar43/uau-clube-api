@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const normalizePlate = (value: string) =>
-	value
+	(value ?? "")
 		.trim()
 		.toUpperCase()
 		.replace(/[^A-Z0-9]/g, ""); // remove hífen, espaço, etc.
@@ -12,11 +12,16 @@ export const RegisterUserCarDTO = z.object({
 			required_error: "Placa é obrigatória",
 			invalid_type_error: "Placa deve ser uma string",
 		})
+		.min(1, "Placa é obrigatória")
 		.transform(normalizePlate)
-		.refine((v) => v.length === 7, "Placa deve ter 7 caracteres (sem hífen/espaço)")
-		// Opcional: valida formato BR (antiga ou Mercosul)
 		.refine(
-			(v) => /^[A-Z]{3}[0-9]{4}$/.test(v) || /^[A-Z]{3}[0-9][A-Z][0-9]{2}$/.test(v),
+			(v) => v.length === 7,
+			"Placa deve ter 7 caracteres (sem hífen/espaço)",
+		)
+		.refine(
+			(v) =>
+				/^[A-Z]{3}[0-9]{4}$/.test(v) || // AAA9999
+				/^[A-Z]{3}[0-9][A-Z][0-9]{2}$/.test(v), // AAA9A99 (Mercosul)
 			"Placa inválida (formato não reconhecido)",
 		),
 

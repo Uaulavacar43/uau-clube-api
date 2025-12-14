@@ -1,3 +1,5 @@
+// src/modules/subscription/SubscriptionService.ts
+
 import { envConfig } from "../../config/envConfig";
 import { warnAdminSubscription } from "../../emails/warnAdminSubscription";
 import type { Subscription } from "../../entities/Subscription";
@@ -19,12 +21,29 @@ export class SubscriptionService {
         private mailingQueue: MailingQueue,
     ) {}
 
-    // Função para cancelar uma assinatura existente
+    /**
+     * Cancelamento de assinatura:
+     * - Para plano recorrente (plan.isPackage = false):
+     *   - Se existir subscriptionIdAsaas, cancela no ASAAS para impedir novas cobranças.
+     *   - Se NÃO existir subscriptionIdAsaas, avisa o admin (inconsistência / migração / falha de vínculo).
+     * - Para pacote (plan.isPackage = true):
+     *   - Não existe assinatura recorrente no ASAAS para cancelar (normalmente é cobrança avulsa/pagamento).
+     *
+     * Importante:
+     * - O código anterior tinha uma regra impossível: exigia subscription.isActive = true,
+     *   mas bloqueava o cancelamento se expiresAt > now (o que normalmente é verdade quando está ativa).
+     * - Aqui o cancelamento é permitido e idempotente: se a assinatura existir, marcamos como cancelada localmente.
+     */
     public async cancelSubscription(subscriptionId: number): Promise<void> {
-        const subscription = await this.subscriptionRepository.findById(subscriptionId);
+        const subscription =
+            await this.subscriptionRepository.findById(subscriptionId);
 
-        if (!subscription || !subscription.isActive || !subscription.planId) {
-            throw new AppError("Assinatura não encontrada ou já está inativa", 404);
+        if (!subscription) {
+            throw new AppError("Assinatura não encontrada", 404);
+        }
+
+        if (!subscription.planId) {
+            throw new AppError("Assinatura não possui plano vinculado", 400);
         }
 
         const plan = await this.planRepository.findById(subscription.planId);
@@ -37,54 +56,46 @@ export class SubscriptionService {
             throw new AppError("Usuário não encontrado", 404);
         }
 
-        if (subscription.expiresAt && subscription.expiresAt > new Date()) {
-            throw new AppError(
-                "Você não pode cancelar uma assinatura que ainda não expirou",
-                400,
-            );
-        }
-
         const { html, text, subject } = warnAdminSubscription(
             `${user.name} (ID: ${user.id})`,
         );
 
-        // Fazemos o narrowing em cima de uma variável local
         const asaasId = subscription.subscriptionIdAsaas;
 
-        // Mantém a mesma tabela verdade do teu código original, só que de forma
-        // que o TS consiga enxergar que `asaasId` é string no último branch.
-        if (!asaasId && !plan.isPackage) {
-            // Caso 1: não tem subscriptionIdAsaas e não é pacote → avisa admin
-            await this.mailingQueue.addToQueue({
-                to: envConfig.MAILER_ADMIN_EMAIL,
-                subject,
-                text,
-                html,
-            });
-        } else if (!asaasId) {
-            // Caso 2: não tem subscriptionIdAsaas e é pacote → também avisa admin
-            await this.mailingQueue.addToQueue({
-                to: envConfig.MAILER_ADMIN_EMAIL,
-                subject,
-                text,
-                html,
-            });
-        } else if (!plan.isPackage) {
-            // Caso 3: tem subscriptionIdAsaas e não é pacote → cancela no Asaas
-            // Aqui o TS sabe que asaasId é string
-            await asaasCancelSubscription(asaasId);
+        // Recorrente: tenta cancelar no ASAAS (se possível), ou avisa admin se faltou vínculo.
+        if (!plan.isPackage) {
+            if (!asaasId) {
+                await this.mailingQueue.addToQueue({
+                    to: envConfig.MAILER_ADMIN_EMAIL,
+                    subject,
+                    text,
+                    html,
+                });
+            } else {
+                await asaasCancelSubscription(asaasId);
+            }
         }
-        // Caso 4: asaasId existe e plan.isPackage = true → não faz nada (igual original)
 
+        // Local: sempre marca como cancelada/inativa.
+        // Observação: o método do repository atualiza isActive=false e endDate=agora.
         await this.subscriptionRepository.cancel(subscriptionId);
     }
 
-    // Função para atualizar uma assinatura existente
+    /**
+     * Atualiza uma assinatura existente (vínculo de veículo).
+     * Regras:
+     * - A assinatura deve existir.
+     * - O carro deve existir.
+     * - O carro deve pertencer ao mesmo usuário da assinatura.
+     * - O carro não pode já ter outra assinatura ativa (diferente desta) vinculada.
+     */
     public async updateSubscription(
         subscriptionId: number,
         data: UpdateSubscriptionDTO,
     ): Promise<Subscription> {
-        const subscription = await this.subscriptionRepository.findById(subscriptionId);
+        const subscription =
+            await this.subscriptionRepository.findById(subscriptionId);
+
         if (!subscription) {
             throw new AppError("Assinatura não encontrada", 404);
         }
@@ -94,7 +105,7 @@ export class SubscriptionService {
             throw new AppError("Veículo não encontrado", 404);
         }
 
-        // Garante integridade: o veículo precisa pertencer ao mesmo usuário da assinatura
+        // Integridade: o veículo precisa pertencer ao mesmo usuário da assinatura
         if (car.userId !== subscription.userId) {
             throw new AppError(
                 "Este veículo não pertence ao usuário associado a esta assinatura",
@@ -102,20 +113,31 @@ export class SubscriptionService {
             );
         }
 
-        // Se quiser bloquear atualização de assinaturas inativas, basta descomentar:
-        // if (!subscription.isActive) {
-        // 	throw new AppError(
-        // 		"Assinatura está inativa e não pode ser atualizada",
-        // 		400,
-        // 	);
-        // }
+        // Proteção: não permite vincular a assinatura a um carro que já tenha assinatura ativa diferente
+        // (evita duplicidade de direito de uso por placa).
+        const existingActiveForCar =
+            await this.subscriptionRepository.findByCarLicensePlate(
+                car.licensePlate,
+            );
+
+        if (
+            existingActiveForCar &&
+            existingActiveForCar.id !== subscription.id
+        ) {
+            throw new AppError(
+                "Este veículo já possui uma assinatura ativa vinculada",
+                400,
+            );
+        }
 
         return await this.subscriptionRepository.update(subscriptionId, {
             carId: car.id,
         });
     }
 
-    // Função para listar assinaturas de um usuário
+    /**
+     * Lista assinaturas do usuário (incluindo car quando includeCars=true).
+     */
     public async listSubscriptions(userId: number): Promise<Subscription[]> {
         return await this.subscriptionRepository.findByUserId(userId, true);
     }

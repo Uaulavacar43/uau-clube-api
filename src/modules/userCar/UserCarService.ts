@@ -7,6 +7,11 @@ import type { RegisterUserCarDTO } from "./dto/RegisterUserCarDTO";
 import type { UpdateUserCarDTO } from "./dto/UpdateUserCarDTO";
 import { PaymentService } from "../payment/PaymentService";
 
+type RegisterCarResult = {
+    car: UserCar;
+    created: boolean;
+};
+
 export class UserCarService {
     constructor(
         private userCarRepository: IUserCarRepository,
@@ -15,48 +20,97 @@ export class UserCarService {
     ) {}
 
     private normalizeLicensePlate(licensePlate: string): string {
-        if (!licensePlate) {
-            return licensePlate;
+        if (!licensePlate) return licensePlate;
+        return (licensePlate ?? "")
+            .trim()
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, "");
+    }
+
+    private isPrivilegedRole(role?: string): boolean {
+        return role === "ADMIN" || role === "MANAGER";
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    private async findByLicensePlateWithRetry(licensePlate: string): Promise<UserCar | null> {
+        // 6 tentativas em ~ (0 + 40 + 80 + 120 + 160 + 200)ms = 600ms no total
+        // Suficiente para “acompanhar” commit de transação concorrente no Postgres.
+        const attempts = [0, 40, 80, 120, 160, 200];
+
+        for (let i = 0; i < attempts.length; i++) {
+            const wait = attempts[i];
+            if (wait > 0) await this.sleep(wait);
+
+            const car = await this.userCarRepository.findByLicensePlate(licensePlate);
+            if (car) return car;
         }
-        return licensePlate.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+
+        return null;
+    }
+
+    private async ensureSubscriptionSafe(userId: number, carId: number, context: string): Promise<void> {
+        if (!this.paymentService) {
+            console.warn(
+                `[UserCarService] PaymentService não injetado; pulando vinculação automática de assinatura. Context=${context}`,
+            );
+            return;
+        }
+
+        try {
+            await this.paymentService.ensureSubscriptionWhenCarAdded(userId, carId);
+        } catch (err: any) {
+            console.error(
+                `[UserCarService] Falha ao garantir assinatura após registrar carro. Context=${context} userId=${userId} carId=${carId}`,
+                err?.message || err,
+            );
+        }
     }
 
     public async registerCar(
         data: RegisterUserCarDTO,
         userId: number,
-    ): Promise<UserCar> {
-        const resolvedUserId = data.userId ?? userId;
-
+        actor?: Pick<User, "id" | "role">,
+    ): Promise<RegisterCarResult> {
         const normalizedPlate = this.normalizeLicensePlate(data.licensePlate);
 
-        const { userId: _dtoUserId, licensePlate, ...restData } = data as RegisterUserCarDTO & {
-            id?: number;
-        };
+        const dtoUserId = data.userId;
+        let resolvedUserId = userId;
 
-        const existingCar = await this.userCarRepository.findByLicensePlate(
-            normalizedPlate,
-        );
+        if (dtoUserId !== undefined && dtoUserId !== null) {
+            if (dtoUserId !== userId) {
+                if (!this.isPrivilegedRole(actor?.role)) {
+                    throw new AppError(
+                        "Você não está autorizado a registrar veículo para outro usuário",
+                        403,
+                    );
+                }
+                resolvedUserId = dtoUserId;
+            } else {
+                resolvedUserId = userId;
+            }
+        }
+
+        const {
+            userId: _ignoredDtoUserId,
+            licensePlate: _ignoredPlate,
+            ...restData
+        } = data;
+
+        const existingCar = await this.userCarRepository.findByLicensePlate(normalizedPlate);
 
         if (existingCar) {
             if (existingCar.userId !== resolvedUserId) {
                 throw new AppError(
                     "Carro com esta placa já está vinculado a outro usuário",
-                    400,
+                    409,
                 );
             }
 
-            if (this.paymentService) {
-                await this.paymentService.ensureSubscriptionWhenCarAdded(
-                    resolvedUserId,
-                    existingCar.id,
-                );
-            } else {
-                console.warn(
-                    "[UserCarService] PaymentService não injetado; pulando vinculação automática de assinatura ao carro existente.",
-                );
-            }
-
-            return existingCar;
+            await this.ensureSubscriptionSafe(resolvedUserId, existingCar.id, "EXISTING_PLATE_IDEMPOTENT");
+            return { car: existingCar, created: false };
         }
 
         try {
@@ -66,18 +120,8 @@ export class UserCarService {
                 userId: resolvedUserId,
             });
 
-            if (this.paymentService) {
-                await this.paymentService.ensureSubscriptionWhenCarAdded(
-                    resolvedUserId,
-                    createdCar.id,
-                );
-            } else {
-                console.warn(
-                    "[UserCarService] PaymentService não injetado; pulando vinculação automática de assinatura ao carro recém-criado.",
-                );
-            }
-
-            return createdCar;
+            await this.ensureSubscriptionSafe(resolvedUserId, createdCar.id, "CREATED_NEW_CAR");
+            return { car: createdCar, created: true };
         } catch (error: any) {
             if (
                 error &&
@@ -85,32 +129,23 @@ export class UserCarService {
                 "code" in error &&
                 (error as any).code === "P2002"
             ) {
-                const carAfterError =
-                    await this.userCarRepository.findByLicensePlate(normalizedPlate);
+                // Corrida real: outra transação pode ter criado a mesma placa e ainda estar commitando.
+                const carAfterError = await this.findByLicensePlateWithRetry(normalizedPlate);
 
                 if (carAfterError) {
                     if (carAfterError.userId !== resolvedUserId) {
                         throw new AppError(
                             "Carro com esta placa já está vinculado a outro usuário",
-                            400,
+                            409,
                         );
                     }
 
-                    if (this.paymentService) {
-                        await this.paymentService.ensureSubscriptionWhenCarAdded(
-                            resolvedUserId,
-                            carAfterError.id,
-                        );
-                    } else {
-                        console.warn(
-                            "[UserCarService] PaymentService não injetado; vinculação automática de assinatura foi pulada após P2002.",
-                        );
-                    }
-
-                    return carAfterError;
+                    await this.ensureSubscriptionSafe(resolvedUserId, carAfterError.id, "P2002_FETCHED_EXISTING");
+                    return { car: carAfterError, created: false };
                 }
 
-                throw new AppError("Carro com esta placa já está registrado", 400);
+                // Se mesmo após retry não achou, mantém 409 (não dá para afirmar owner com segurança)
+                throw new AppError("Carro com esta placa já está registrado", 409);
             }
 
             throw error;
@@ -130,43 +165,48 @@ export class UserCarService {
             throw new AppError("Carro não encontrado", 404);
         }
 
-        // USER só pode editar o próprio carro
-        if (user.role === "USER" && existingCar.userId !== user.id) {
+        if (!this.isPrivilegedRole(user.role) && existingCar.userId !== user.id) {
             throw new AppError("Você não está autorizado a atualizar este carro", 403);
         }
 
         const updateData: UpdateUserCarDTO = { ...data };
 
-        /**
-         * REGRA:
-         * - USER NÃO pode mudar placa.
-         * - Mas se o frontend mandar a mesma placa no payload, a gente não quebra o update.
-         */
-        if (updateData.licensePlate) {
-            const normalizedIncoming = this.normalizeLicensePlate(updateData.licensePlate);
+        if ((updateData as any).licensePlate) {
+            const normalizedIncoming = this.normalizeLicensePlate((updateData as any).licensePlate);
             const currentNormalized = existingCar.licensePlate
                 ? this.normalizeLicensePlate(existingCar.licensePlate)
                 : "";
 
-            if (user.role !== "ADMIN") {
-                // Se for a mesma, ignora; se for diferente, bloqueia.
+            if (!this.isPrivilegedRole(user.role)) {
                 if (normalizedIncoming !== currentNormalized) {
-                    throw new AppError("Apenas administradores podem atualizar a placa", 403);
+                    throw new AppError(
+                        "Apenas administradores ou gerentes podem atualizar a placa",
+                        403,
+                    );
                 }
-                // mesma placa -> remove do update para não gerar conflito
                 delete (updateData as any).licensePlate;
             } else {
-                // ADMIN pode mudar placa, então normaliza e aplica
-                updateData.licensePlate = normalizedIncoming;
+                (updateData as any).licensePlate = normalizedIncoming;
             }
         }
 
-        // Se seu DTO tiver userId, não permita alteração aqui (evita troca de dono por payload)
-        if ("userId" in updateData) {
+        if ("userId" in (updateData as any)) {
             delete (updateData as any).userId;
         }
 
-        return await this.userCarRepository.update(existingCar.id, updateData);
+        try {
+            return await this.userCarRepository.update(existingCar.id, updateData);
+        } catch (error: any) {
+            if (
+                error &&
+                typeof error === "object" &&
+                "code" in error &&
+                (error as any).code === "P2002"
+            ) {
+                throw new AppError("Já existe um veículo registrado com esta placa", 409);
+            }
+            throw error;
+        }
     }
 
     public async deleteCar(
@@ -178,29 +218,29 @@ export class UserCarService {
             throw new AppError("Carro não encontrado", 404);
         }
 
-        if (user.role === "USER" && existingCar.userId !== user.id) {
+        if (!this.isPrivilegedRole(user.role) && existingCar.userId !== user.id) {
             throw new AppError("Você não está autorizado a excluir este carro", 403);
         }
 
-        if (!existingCar.licensePlate) {
-            throw new AppError(
-                "Veículo não possui uma placa registrada para validação de assinatura",
-                400,
+        const subscriptionByUserAndCar =
+            await this.subscriptionRepository.findByUserAndCar(
+                existingCar.userId,
+                existingCar.id,
             );
+
+        if (subscriptionByUserAndCar?.isActive) {
+            throw new AppError("Este veículo possui um plano ativo", 400);
         }
 
-        /**
-         * REGRA:
-         * - Se existe assinatura ATIVA vinculada a esse carro/placa, não pode deletar.
-         * Observação: isso é o que impede o usuário de “burlar” o plano apagando o carro.
-         */
-        const subscriptionCar =
-            await this.subscriptionRepository.findByCarLicensePlate(
-                existingCar.licensePlate,
-            );
+        if (existingCar.licensePlate) {
+            const subscriptionByPlate =
+                await this.subscriptionRepository.findByCarLicensePlate(
+                    existingCar.licensePlate,
+                );
 
-        if (subscriptionCar?.isActive) {
-            throw new AppError("Este veículo possui um plano ativo", 400);
+            if (subscriptionByPlate?.isActive) {
+                throw new AppError("Este veículo possui um plano ativo", 400);
+            }
         }
 
         await this.userCarRepository.delete(carId);

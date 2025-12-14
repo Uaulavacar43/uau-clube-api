@@ -8,6 +8,10 @@ import type { UserCarService } from "./UserCarService";
 export class UserCarController {
 	constructor(private userCarService: UserCarService) {}
 
+	private isPrivilegedRole(role?: string): boolean {
+		return role === "ADMIN" || role === "MANAGER";
+	}
+
 	public async registerUserCar(
 		req: Request,
 		res: Response,
@@ -16,26 +20,28 @@ export class UserCarController {
 		const data = res.locals as RegisterUserCarDTO;
 
 		try {
-			const authenticatedUserId = req.user?.id;
-			if (!authenticatedUserId) {
+			const actor = req.user;
+			if (!actor || !actor.id) {
 				throw new AppError("Usuário não autenticado", 401);
 			}
 
-			let targetUserId = authenticatedUserId;
-
-			// Admin pode cadastrar carro para outro usuário
-			if (data.userId && data.userId !== authenticatedUserId) {
-				if (req.user?.role !== "ADMIN") {
+			if (data.userId && data.userId !== actor.id) {
+				if (!this.isPrivilegedRole(actor.role)) {
 					throw new AppError(
-						"Apenas administradores podem criar carros para outros usuários",
+						"Apenas administradores ou gerentes podem criar carros para outros usuários",
 						403,
 					);
 				}
-				targetUserId = data.userId;
 			}
 
-			const car = await this.userCarService.registerCar(data, targetUserId);
-			res.status(201).customJson(car);
+			const result = await this.userCarService.registerCar(
+				data,
+				actor.id,
+				{ id: actor.id, role: actor.role },
+			);
+
+			const status = result.created ? 201 : 200;
+			res.status(status).customJson(result.car);
 		} catch (error) {
 			next(error);
 		}
@@ -43,11 +49,12 @@ export class UserCarController {
 
 	public async listCars(req: Request, res: Response, next: NextFunction) {
 		try {
-			if (!req.user) {
+			const actor = req.user;
+			if (!actor || !actor.id) {
 				return res.status(401).customJson({ error: "Não autorizado" });
 			}
 
-			const cars = await this.userCarService.listCars(req.user.id);
+			const cars = await this.userCarService.listCars(actor.id);
 			return res.status(200).customJson(cars);
 		} catch (error) {
 			next(error);
@@ -56,28 +63,25 @@ export class UserCarController {
 
 	public async updateCar(req: Request, res: Response, next: NextFunction) {
 		try {
-			const data = res.locals as UpdateUserCarDTO;
-
-			if (!req.user) {
+			const actor = req.user;
+			if (!actor || !actor.id) {
 				return res.status(401).customJson({ error: "Não autorizado" });
 			}
 
-			let targetUserId = req.user.id;
+			const data = res.locals as UpdateUserCarDTO;
 
-			// Admin pode editar carro de outro user (se seu DTO permitir userId)
-			if (data.userId && data.userId !== req.user.id) {
-				if (req.user?.role !== "ADMIN") {
+			if ((data as any).userId && (data as any).userId !== actor.id) {
+				if (!this.isPrivilegedRole(actor.role)) {
 					throw new AppError(
-						"Apenas administradores podem atualizar carros de outros usuários",
+						"Apenas administradores ou gerentes podem atualizar carros de outros usuários",
 						403,
 					);
 				}
-				targetUserId = data.userId;
 			}
 
 			const updatedCar = await this.userCarService.updateCar(data, {
-				id: targetUserId,
-				role: req.user.role,
+				id: actor.id,
+				role: actor.role,
 			});
 
 			return res.status(200).customJson(updatedCar);
@@ -88,13 +92,18 @@ export class UserCarController {
 
 	public async deleteCar(req: Request, res: Response, next: NextFunction) {
 		try {
-			const data = res.locals as DeleteUserCarDTO;
-
-			if (!req.user) {
+			const actor = req.user;
+			if (!actor || !actor.id) {
 				throw new AppError("Não autorizado", 401);
 			}
 
-			await this.userCarService.deleteCar(data.id, req.user);
+			const data = res.locals as DeleteUserCarDTO;
+
+			await this.userCarService.deleteCar(data.id, {
+				id: actor.id,
+				role: actor.role,
+			});
+
 			res.status(204).send();
 		} catch (error) {
 			next(error);
@@ -103,7 +112,23 @@ export class UserCarController {
 
 	public async listUserCars(req: Request, res: Response, next: NextFunction) {
 		try {
+			const actor = req.user;
+			if (!actor || !actor.id) {
+				throw new AppError("Não autorizado", 401);
+			}
+
 			const userId = Number(req.params.userId);
+			if (!Number.isFinite(userId) || userId <= 0) {
+				throw new AppError("Parâmetro userId inválido", 400);
+			}
+
+			if (!this.isPrivilegedRole(actor.role) && actor.id !== userId) {
+				throw new AppError(
+					"Você não está autorizado a listar veículos de outro usuário",
+					403,
+				);
+			}
+
 			const cars = await this.userCarService.listCars(userId);
 			return res.status(200).customJson(cars);
 		} catch (error) {

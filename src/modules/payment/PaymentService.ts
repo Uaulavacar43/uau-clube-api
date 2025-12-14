@@ -86,8 +86,15 @@ export class PaymentService {
     ) {}
 
     // ---------------------------------------------------------------------
-    // Helpers internos de status / tipos de plano
+    // Helpers internos (placa, status e tipos de plano)
     // ---------------------------------------------------------------------
+
+    private normalizePlate(value: string): string {
+        return (value ?? "")
+            .trim()
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, "");
+    }
 
     private mapAsaasPaymentStatusToInternal(
         status: ASAASPaymentStatusEnum,
@@ -335,9 +342,7 @@ export class PaymentService {
 
         const coupon = await this.validateCoupon(data.coupon, plan.id);
 
-        const hasSubscription = await this.carHasSubscription(
-            car.licensePlate,
-        );
+        const hasSubscription = await this.carHasSubscription(car.licensePlate);
         if (hasSubscription) {
             throw new AppError(
                 "Este carro já tem assinatura, caso queira alterar o plano do carro, cancele a assinatura atual",
@@ -368,6 +373,13 @@ export class PaymentService {
             billingSubscriptionTypes.get(data.type);
         if (!billingSubscriptionType) {
             throw new AppError("Tipo de pagamento inválido", 400);
+        }
+
+        if (
+            billingPaymentType === ASAASPaymentBillingTypeEnum.PIX ||
+            billingSubscriptionType === ASAASSubscriptionBillingTypeEnum.PIX
+        ) {
+            await asaasGetOrCreateRandomPixKey();
         }
 
         console.log("[subscribeToPlan] Criando cliente no ASAAS...");
@@ -563,11 +575,10 @@ export class PaymentService {
                 );
                 createdSubscription = subscription;
             } else {
-                createdSubscription =
-                    await this.subscriptionRepository.update(
-                        subscription.id,
-                        subscription,
-                    );
+                createdSubscription = await this.subscriptionRepository.update(
+                    subscription.id,
+                    subscription,
+                );
             }
 
             return {
@@ -810,15 +821,12 @@ export class PaymentService {
 
     /**
      * Busca o último pagamento PAID com planId para o usuário.
-     * Usa o repositório com filtro por userId e filtra status em memória,
-     * para não depender de um campo "status" no PaymentFilter.
+     * Usa o repositório com filtro por userId e filtra em memória, com fallback de ordenação local.
      */
-
     private async findLastPaidPlanPaymentForUser(
         userId: number,
     ): Promise<Payment | null> {
         try {
-            // 1) Busca todos os pagamentos do usuário, já ordenados por createdAt desc
             const payments = await this.paymentRepository.getAll({ userId });
 
             if (payments.length === 0) {
@@ -828,10 +836,15 @@ export class PaymentService {
                 return null;
             }
 
-            // 2) Encontra o primeiro pagamento que:
-            //    - está PAID
-            //    - tem planId definido (é pagamento de plano, não avulso)
-            const lastPaidWithPlan = payments.find(
+            const sorted = [...payments].sort((a, b) => {
+                const aDate =
+                    (a.paymentDate ?? a.createdAt ?? new Date(0)).getTime();
+                const bDate =
+                    (b.paymentDate ?? b.createdAt ?? new Date(0)).getTime();
+                return bDate - aDate;
+            });
+
+            const lastPaidWithPlan = sorted.find(
                 (paymentItem) =>
                     paymentItem.status === "PAID" &&
                     paymentItem.planId !== undefined &&
@@ -855,7 +868,6 @@ export class PaymentService {
         }
     }
 
-
     /**
      * Regra completa para casos importados do ASAAS (tipo Leo) ao adicionar carro:
      *
@@ -878,7 +890,14 @@ export class PaymentService {
             return;
         }
 
-        const normalizedPlate = car.licensePlate.trim().toUpperCase();
+        const normalizedPlate = this.normalizePlate(car.licensePlate);
+
+        if (!normalizedPlate) {
+            console.warn(
+                `[ensureSubscriptionForUserAndCarFromExistingPayments] Carro ${carId} sem placa válida para userId=${userId}.`,
+            );
+            return;
+        }
 
         const subscriptionByPlate =
             await this.subscriptionRepository.findByCarLicensePlate(
@@ -886,6 +905,13 @@ export class PaymentService {
             );
 
         if (subscriptionByPlate) {
+            if (subscriptionByPlate.userId !== userId) {
+                console.warn(
+                    `[ensureSubscriptionForUserAndCarFromExistingPayments] Atenção: assinatura encontrada por placa ${normalizedPlate} pertence a outro usuário (subscription.userId=${subscriptionByPlate.userId}, userId=${userId}). Não vinculando carId.`,
+                );
+                return;
+            }
+
             if (
                 subscriptionByPlate.carId === undefined ||
                 subscriptionByPlate.carId === null
@@ -927,6 +953,10 @@ export class PaymentService {
                     await this.subscriptionRepository.update(
                         subscriptionByPlate.id,
                         subscriptionByPlate,
+                    );
+                } else {
+                    console.log(
+                        `[ensureSubscriptionForUserAndCarFromExistingPayments] Assinatura ${subscriptionByPlate.id} encontrada por placa, porém sem pagamento PAID compatível (planId). Mantendo estado atual.`,
                     );
                 }
             }
@@ -1123,7 +1153,7 @@ export class PaymentService {
 
             const payload: ASAASCreateSubscriptionDTO = {
                 customer: customerId,
-                nextDueDate: new Date().toISOString().split("T")[0],
+                nextDueDate: startDate.toISOString().split("T")[0],
                 value: plan.price,
                 billingType,
                 cycle,
@@ -1267,13 +1297,15 @@ export class PaymentService {
             return;
         }
 
-        const localSubscription =
-            await this.subscriptionRepository.getByAsaasId(
-                subscriptionAsaasId,
-            );
+        const event = body.event;
+
+        // Para eventos diferentes de SUBSCRIPTION_CREATED, seguimos usando lookup por asaasId
+        const localSubscriptionByAsaas =
+            await this.subscriptionRepository.getByAsaasId(subscriptionAsaasId);
+
         if (
-            !localSubscription &&
-            body.event !== ASAASWebhookEventEnum.SUBSCRIPTION_CREATED
+            !localSubscriptionByAsaas &&
+            event !== ASAASWebhookEventEnum.SUBSCRIPTION_CREATED
         ) {
             console.log(
                 `[handleSubscriptionWebhook] Assinatura ${subscriptionAsaasId} não encontrada localmente.`,
@@ -1281,8 +1313,9 @@ export class PaymentService {
             return;
         }
 
+        // SUBSCRIPTION_CREATED: o correto é atualizar a assinatura local pelo subId (quando existir)
         if (
-            body.event === ASAASWebhookEventEnum.SUBSCRIPTION_CREATED &&
+            event === ASAASWebhookEventEnum.SUBSCRIPTION_CREATED &&
             body.subscription
         ) {
             console.info(
@@ -1294,19 +1327,20 @@ export class PaymentService {
             let externalReferenceUserId: number | undefined;
             let externalReferencePlanId: number | undefined;
             let externalReferenceCouponId: number | undefined;
+            let externalReferenceSubId: number | undefined;
 
             if (externalReferenceRaw) {
                 try {
-                    const externalReference = JSON.parse(
-                        externalReferenceRaw,
-                    ) as {
+                    const externalReference = JSON.parse(externalReferenceRaw) as {
                         userId?: number;
                         planId?: number;
                         couponId?: number;
+                        subId?: number;
                     };
                     externalReferenceUserId = externalReference.userId;
                     externalReferencePlanId = externalReference.planId;
                     externalReferenceCouponId = externalReference.couponId;
+                    externalReferenceSubId = externalReference.subId;
                 } catch (parseError) {
                     console.error(
                         "[handleSubscriptionWebhook] Erro ao fazer parse da externalReference:",
@@ -1338,23 +1372,52 @@ export class PaymentService {
                 };
             }
 
-            const existingSubscription =
-                await this.subscriptionRepository.getByAsaasId(
-                    body.subscription.id,
+            // 1) Se veio subId: atualizar a subscription local já criada (sem criar duplicata)
+            if (
+                externalReferenceSubId !== undefined &&
+                externalReferenceSubId !== null
+            ) {
+                const localById = await this.subscriptionRepository.findById(
+                    externalReferenceSubId,
                 );
-            if (existingSubscription) {
-                console.info(
-                    `[handleSubscriptionWebhook] Assinatura já existe no banco: ${body.subscription.id}`,
-                );
-                return {
-                    status: 200,
-                    message: "Assinatura já registrada",
-                };
+                if (localById) {
+                    // Atualiza vínculo com ASAAS
+                    localById.subscriptionIdAsaas = body.subscription.id;
+                    localById.amount = body.subscription.value;
+
+                    // billingType pode vir diferente, mas se vier, atualize
+                    if (body.subscription.billingType) {
+                        localById.paymentMethod = body.subscription.billingType;
+                    }
+
+                    // Mantém “SUSPENDED” até confirmação de pagamento (PAYMENT webhook).
+                    await this.subscriptionRepository.update(
+                        localById.id,
+                        localById,
+                    );
+
+                    console.info(
+                        `[handleSubscriptionWebhook] Subscription local ${localById.id} atualizada com subscriptionIdAsaas=${body.subscription.id}.`,
+                    );
+
+                    return {
+                        status: 200,
+                        message:
+                            "Assinatura vinculada ao registro local existente",
+                    };
+                }
             }
 
-            console.info(
-                `[handleSubscriptionWebhook] Registrando assinatura (inativa até pagamento) para userId: ${externalReferenceUserId}, planId: ${externalReferencePlanId}`,
+            // 2) Sem subId ou não encontrada: fallback (cria nova), mas evita duplicar por asaasId
+            const existingByAsaas = await this.subscriptionRepository.getByAsaasId(
+                body.subscription.id,
             );
+            if (existingByAsaas) {
+                console.info(
+                    `[handleSubscriptionWebhook] Assinatura já existe no banco por asaasId: ${body.subscription.id}`,
+                );
+                return { status: 200, message: "Assinatura já registrada" };
+            }
 
             const startDate = new Date();
             const expiresAt = this.calculatePlanExpiration(plan, startDate);
@@ -1375,27 +1438,30 @@ export class PaymentService {
             });
 
             await this.subscriptionRepository.create(newSubscription);
+
             console.info(
-                `[handleSubscriptionWebhook] Assinatura salva como INATIVA. Ativação depende de pagamento.`,
+                `[handleSubscriptionWebhook] Assinatura criada via fallback (sem subId). asaasId=${body.subscription.id}`,
             );
 
             return {
                 status: 200,
-                message: "Assinatura registrado (aguardando pagamento)",
+                message: "Assinatura registrada (fallback) aguardando pagamento",
             };
         }
 
-        if (newStatus === "CANCELED" && localSubscription) {
-            localSubscription.isActive = false;
-            localSubscription.subscriptionStatus = "CANCELED";
-            localSubscription.endDate = new Date();
+        // Demais eventos: se cancelado, marca local (mantendo subscriptionStatus real)
+        if (newStatus === "CANCELED" && localSubscriptionByAsaas) {
+            localSubscriptionByAsaas.isActive = false;
+            localSubscriptionByAsaas.subscriptionStatus = "CANCELED";
+            localSubscriptionByAsaas.endDate = new Date();
 
             await this.subscriptionRepository.update(
-                localSubscription.id,
-                localSubscription,
+                localSubscriptionByAsaas.id,
+                localSubscriptionByAsaas,
             );
+
             console.info(
-                `[handleSubscriptionWebhook] Assinatura ${localSubscription.id} desativada por evento de cancelamento, status marcado como CANCELED.`,
+                `[handleSubscriptionWebhook] Assinatura ${localSubscriptionByAsaas.id} desativada por cancelamento ASAAS.`,
             );
         }
     }
@@ -1445,6 +1511,7 @@ export class PaymentService {
             let couponId: number | undefined;
             let subId: number | undefined;
 
+            // 1) Primeiro: tenta resolver via externalReference do próprio webhook
             if (body.payment.externalReference) {
                 try {
                     const externalReference = JSON.parse(
@@ -1469,33 +1536,153 @@ export class PaymentService {
             }
 
             console.log(
-                `[handlePaymentWebhook] userId inicial: ${userId}, planId inicial: ${planId}, couponId inicial: ${couponId}`,
+                `[handlePaymentWebhook] userId inicial: ${userId}, planId inicial: ${planId}, couponId inicial: ${couponId}, subId inicial: ${subId}`,
             );
 
-            if (!userId && body.payment.subscription) {
+            // 2) Se veio subscriptionAsaasId no pagamento: tenta resolver por getByAsaasId
+            if ((!userId || !planId) && body.payment.subscription) {
                 console.log(
-                    "[handlePaymentWebhook] Procurando usuário a partir da assinatura local...",
+                    "[handlePaymentWebhook] Tentando resolver userId/planId via subscription (asaasId) do pagamento...",
                 );
                 const localSub =
                     await this.subscriptionRepository.getByAsaasId(
                         body.payment.subscription,
                     );
                 if (localSub) {
-                    userId = localSub.userId;
-                    planId = localSub.planId;
-                    subId = localSub.id;
+                    userId = userId ?? localSub.userId;
+                    planId = planId ?? (localSub.planId ?? undefined);
+                    subId = subId ?? localSub.id;
                 }
             }
 
-            if (subId) {
+            // 3) Se veio installment no pagamento: tenta resolver por getByInstallmentIdAsaas
+            if ((!userId || !planId) && body.payment.installment) {
+                console.log(
+                    "[handlePaymentWebhook] Tentando resolver userId/planId via installment do pagamento...",
+                );
+                const localSubByInstallment =
+                    await this.subscriptionRepository.getByInstallmentIdAsaas(
+                        body.payment.installment,
+                    );
+                if (localSubByInstallment) {
+                    userId = userId ?? localSubByInstallment.userId;
+                    planId =
+                        planId ?? (localSubByInstallment.planId ?? undefined);
+                    subId = subId ?? localSubByInstallment.id;
+                }
+            }
+
+            // 4) Se veio subId no externalReference: resolve por findById
+            if ((!userId || !planId) && subId) {
+                console.log(
+                    "[handlePaymentWebhook] Tentando resolver userId/planId via subId (registro local)...",
+                );
                 const subscriptionFromId =
                     await this.subscriptionRepository.findById(subId);
                 if (subscriptionFromId) {
-                    userId = subscriptionFromId.userId;
-                    planId = subscriptionFromId.planId;
+                    userId = userId ?? subscriptionFromId.userId;
+                    planId = planId ?? (subscriptionFromId.planId ?? undefined);
                     subId = subscriptionFromId.id;
                 }
             }
+
+            /**
+             * 5) Fallback crítico:
+             * Em alguns cenários (principalmente importações/migração),
+             * o webhook pode vir sem externalReference completo.
+             * Aqui consultamos o ASAAS pelo payId e tentamos reparsear externalReference,
+             * além de recuperar subscription/installment para novo lookup local.
+             */
+            if (!userId || (!planId && planId !== 0)) {
+                try {
+                    console.log(
+                        "[handlePaymentWebhook] Fallback: consultando ASAAS por payId para completar vínculo (externalReference/subscription/installment)...",
+                    );
+
+                    type AsaasPaymentLike = {
+                        id: string;
+                        status: ASAASPaymentStatusEnum | string;
+                        subscription?: string | null;
+                        installment?: string | null;
+                        externalReference?: string | null;
+                        billingType?: string | null;
+                        value?: number | string | null;
+                        paymentDate?: string | null;
+                    };
+
+                    const asaasPaymentRaw = await asaasGetPayment(paymentAsaasId);
+                    const asaasPayment = asaasPaymentRaw as AsaasPaymentLike;
+
+                    if (!body.payment.externalReference && asaasPayment.externalReference) {
+                        body.payment.externalReference = asaasPayment.externalReference;
+                        try {
+                            const externalReference = JSON.parse(
+                                asaasPayment.externalReference,
+                            ) as {
+                                userId?: number;
+                                planId?: number;
+                                couponId?: number;
+                                subId?: number;
+                            };
+
+                            userId = userId ?? externalReference.userId;
+                            planId = planId ?? externalReference.planId;
+                            couponId = couponId ?? externalReference.couponId;
+                            subId = subId ?? externalReference.subId;
+                        } catch (parseError) {
+                            console.error(
+                                "[handlePaymentWebhook] Fallback ASAAS: erro ao parsear externalReference:",
+                                parseError,
+                            );
+                        }
+                    }
+
+                    const subscriptionAsaasId =
+                        body.payment.subscription ?? asaasPayment.subscription ?? undefined;
+                    const installmentAsaasId =
+                        body.payment.installment ?? asaasPayment.installment ?? undefined;
+
+                    if ((!userId || !planId) && subscriptionAsaasId) {
+                        const localSub =
+                            await this.subscriptionRepository.getByAsaasId(
+                                subscriptionAsaasId,
+                            );
+                        if (localSub) {
+                            userId = userId ?? localSub.userId;
+                            planId = planId ?? (localSub.planId ?? undefined);
+                            subId = subId ?? localSub.id;
+                        }
+                    }
+
+                    if ((!userId || !planId) && installmentAsaasId) {
+                        const localSubByInstallment =
+                            await this.subscriptionRepository.getByInstallmentIdAsaas(
+                                installmentAsaasId,
+                            );
+                        if (localSubByInstallment) {
+                            userId = userId ?? localSubByInstallment.userId;
+                            planId =
+                                planId ??
+                                (localSubByInstallment.planId ?? undefined);
+                            subId = subId ?? localSubByInstallment.id;
+                        }
+                    }
+
+                    // billingType pode estar ausente no webhook, mas presente no getPayment
+                    if (!body.payment.billingType && asaasPayment.billingType) {
+                        body.payment.billingType = asaasPayment.billingType;
+                    }
+                } catch (fallbackError) {
+                    console.error(
+                        "[handlePaymentWebhook] Fallback ASAAS falhou:",
+                        fallbackError,
+                    );
+                }
+            }
+
+            console.log(
+                `[handlePaymentWebhook] userId resolvido: ${userId}, planId resolvido: ${planId}, couponId resolvido: ${couponId}, subId resolvido: ${subId}`,
+            );
 
             if (userId) {
                 const userExists = await this.userRepository.findById(userId);
@@ -1590,6 +1777,7 @@ export class PaymentService {
                 await this.paymentRepository.create(newPayment);
             }
 
+            // Atualiza assinatura associada quando houver vínculo
             if (body.payment.subscription || subId) {
                 let subscription: Subscription | null = null;
 
@@ -1614,6 +1802,7 @@ export class PaymentService {
                 }
             }
 
+            // Atualiza assinatura por installment (pacotes parcelados)
             if (body.payment.installment) {
                 const subscription =
                     await this.subscriptionRepository.getByInstallmentIdAsaas(

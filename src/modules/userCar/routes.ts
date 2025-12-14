@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import { authMiddleware } from "../../middlewares/auth.middleware";
 import validateRoutePayload from "../../middlewares/validateRoutePayload";
 import { PrismaSubscriptionRepository } from "../../repositories/implementations/PrismaSubscriptionRepository";
@@ -12,13 +12,24 @@ import { UserCarService } from "./UserCarService";
 
 const userCarRepository = new PrismaUserCarRepository();
 const subscriptionRepository = new PrismaSubscriptionRepository();
-const userCarService = new UserCarService(
-	userCarRepository,
-	subscriptionRepository,
-);
+const userCarService = new UserCarService(userCarRepository, subscriptionRepository);
 const userCarController = new UserCarController(userCarService);
 
 const router = Router();
+
+/**
+ * Garante que o DTO que espera `id` receba o valor de `req.params.id`,
+ * sem depender do frontend enviar `id` no body.
+ */
+function injectParamIdIntoBody(req: Request, _res: Response, next: NextFunction) {
+	if (req.params?.id) {
+		req.body = {
+			...(req.body ?? {}),
+			id: req.params.id,
+		};
+	}
+	next();
+}
 
 router.post(
 	"/",
@@ -40,6 +51,7 @@ router.get(
 router.put(
 	"/:id",
 	authMiddleware,
+	injectParamIdIntoBody,
 	validateRoutePayload(UpdateUserCarDTO),
 	asyncHandler(async (req, res, next) => {
 		await userCarController.updateCar(req, res, next);
@@ -48,8 +60,9 @@ router.put(
 
 router.delete(
 	"/:id",
-	validateRoutePayload(DeleteUserCarDTO),
 	authMiddleware,
+	injectParamIdIntoBody,
+	validateRoutePayload(DeleteUserCarDTO),
 	asyncHandler(async (req, res, next) => {
 		await userCarController.deleteCar(req, res, next);
 	}),

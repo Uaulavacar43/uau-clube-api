@@ -7,10 +7,7 @@ import {
 } from "@prisma/client";
 import prisma from "../../config/dbConfig";
 import { User } from "../../entities/User";
-import type {
-	IFilterGetAll,
-	IUserRepository,
-} from "../interfaces/IUserRepository";
+import type { IFilterGetAll, IUserRepository } from "../interfaces/IUserRepository";
 
 interface UserWithSubscriptions extends PrismaUser {
 	subscriptions?: PrismaSubscription[];
@@ -20,10 +17,14 @@ interface UserWithSubscriptions extends PrismaUser {
 }
 
 export class PrismaUserRepository implements IUserRepository {
-	async findByEmail(
-		email: string,
-		withIsDeleted = false,
-	): Promise<User | null> {
+	private normalizePlate(value: string): string {
+		return (value ?? "")
+			.trim()
+			.toUpperCase()
+			.replace(/[^A-Z0-9]/g, "");
+	}
+
+	async findByEmail(email: string, withIsDeleted = false): Promise<User | null> {
 		const userData = await prisma.user.findUnique({
 			where: { email, deletedAt: !withIsDeleted ? null : undefined },
 		});
@@ -31,10 +32,7 @@ export class PrismaUserRepository implements IUserRepository {
 		return this.mapToEntity(userData);
 	}
 
-	async findByCpf(
-		cpf: string | null,
-		withIsDeleted = false,
-	): Promise<User | null> {
+	async findByCpf(cpf: string | null, withIsDeleted = false): Promise<User | null> {
 		if (!cpf) return null;
 		const userData = await prisma.user.findUnique({
 			where: { cpf, deletedAt: !withIsDeleted ? null : undefined },
@@ -43,14 +41,23 @@ export class PrismaUserRepository implements IUserRepository {
 		return this.mapToEntity(userData);
 	}
 
+	/**
+	 * CORREÇÃO: O campo no Prisma é `licensePlate`, não `plate`.
+	 * Além disso, normalizamos a placa para evitar falhas (hífen/espaço/letras minúsculas).
+	 */
 	async findByLicensePlate(licensePlate: string): Promise<any | null> {
+		const normalized = this.normalizePlate(licensePlate);
+
+		if (!normalized) return null;
+
 		const userData = await prisma.user.findFirst({
 			where: {
 				deletedAt: null,
 				cars: {
 					some: {
-						plate: {
-							contains: licensePlate,
+						deletedAt: null,
+						licensePlate: {
+							contains: normalized,
 							mode: Prisma.QueryMode.insensitive,
 						},
 					},
@@ -83,8 +90,9 @@ export class PrismaUserRepository implements IUserRepository {
 						},
 					},
 					where: {
-						plate: {
-							contains: licensePlate,
+						deletedAt: null,
+						licensePlate: {
+							contains: normalized,
 							mode: Prisma.QueryMode.insensitive,
 						},
 					},
@@ -213,14 +221,14 @@ export class PrismaUserRepository implements IUserRepository {
 	}
 
 	async findAllWithPagination({
-		page,
-		pageSize,
-		roles,
-		searchTerm,
-		orderBy = "createdAt",
-		orderDirection = "desc",
-		includePlans = false,
-	}: IFilterGetAll): Promise<{ users: User[]; total: number }> {
+									page,
+									pageSize,
+									roles,
+									searchTerm,
+									orderBy = "createdAt",
+									orderDirection = "desc",
+									includePlans = false,
+								}: IFilterGetAll): Promise<{ users: User[]; total: number }> {
 		const skip = (page - 1) * pageSize;
 		const take = pageSize;
 
@@ -238,29 +246,31 @@ export class PrismaUserRepository implements IUserRepository {
 				rolesCondition = Prisma.sql`AND u."role"::text IN (${Prisma.raw(roleValues)})`;
 			}
 
-			const usersWithLatestPayment = await prisma.$queryRaw<
-				UserWithSubscriptions[]
-			>`
-				SELECT u.*, 
-					MAX(p."createdAt") as "lastPaymentDate"
+			const usersWithLatestPayment = await prisma.$queryRaw<UserWithSubscriptions[]>`
+				SELECT u.*,
+					   MAX(p."createdAt") as "lastPaymentDate"
 				FROM "User" u
-				LEFT JOIN "Payment" p ON u.id = p."userId"
+						 LEFT JOIN "Payment" p ON u.id = p."userId"
 				WHERE u."deletedAt" IS NULL
-				AND p."status" = 'PAID'
-				${rolesCondition}
-				${
-					searchTerm
-						? Prisma.sql`AND (
+				  AND p."status" = 'PAID'
+					${rolesCondition}
+					${
+						searchTerm
+							? Prisma.sql`AND (
 					u."name" ILIKE ${`%${searchTerm}%`} OR
 					u."email" ILIKE ${`%${searchTerm}%`} OR
 					u."phone" ILIKE ${`%${searchTerm}%`} OR
 					u."cpf" ILIKE ${`%${searchTerm}%`}
 				)`
-						: Prisma.empty
-				}
+							: Prisma.empty
+					}
 				GROUP BY u.id
-				ORDER BY "lastPaymentDate" ${orderDirection === "desc" ? Prisma.sql`DESC NULLS LAST` : Prisma.sql`ASC NULLS FIRST`}
-				LIMIT ${take} OFFSET ${skip}
+				ORDER BY "lastPaymentDate" ${
+											   orderDirection === "desc"
+												   ? Prisma.sql`DESC NULLS LAST`
+												   : Prisma.sql`ASC NULLS FIRST`
+										   }
+					LIMIT ${take} OFFSET ${skip}
 			`;
 
 			// Converter os resultados para o formato esperado
@@ -274,20 +284,20 @@ export class PrismaUserRepository implements IUserRepository {
 			const totalResult = await prisma.$queryRaw<[{ count: bigint }]>`
 				SELECT COUNT(DISTINCT u.id) as count
 				FROM "User" u
-				LEFT JOIN "Payment" p ON u.id = p."userId"
+					LEFT JOIN "Payment" p ON u.id = p."userId"
 				WHERE u."deletedAt" IS NULL
-				AND p."status" = 'PAID'
-				${rolesCondition}
-				${
-					searchTerm
-						? Prisma.sql`AND (
+				  AND p."status" = 'PAID'
+					${rolesCondition}
+					${
+						searchTerm
+							? Prisma.sql`AND (
 					u."name" ILIKE ${`%${searchTerm}%`} OR
 					u."email" ILIKE ${`%${searchTerm}%`} OR
 					u."phone" ILIKE ${`%${searchTerm}%`} OR
 					u."cpf" ILIKE ${`%${searchTerm}%`}
 				)`
-						: Prisma.empty
-				}
+							: Prisma.empty
+					}
 			`;
 
 			// Definir o total com o resultado da contagem
@@ -321,31 +331,31 @@ export class PrismaUserRepository implements IUserRepository {
 				OR: !searchTerm
 					? undefined
 					: [
-							{
-								name: {
-									contains: searchTerm,
-									mode: Prisma.QueryMode.insensitive,
-								},
+						{
+							name: {
+								contains: searchTerm,
+								mode: Prisma.QueryMode.insensitive,
 							},
-							{
-								email: {
-									contains: searchTerm,
-									mode: Prisma.QueryMode.insensitive,
-								},
+						},
+						{
+							email: {
+								contains: searchTerm,
+								mode: Prisma.QueryMode.insensitive,
 							},
-							{
-								phone: {
-									contains: searchTerm,
-									mode: Prisma.QueryMode.insensitive,
-								},
+						},
+						{
+							phone: {
+								contains: searchTerm,
+								mode: Prisma.QueryMode.insensitive,
 							},
-							{
-								cpf: {
-									contains: searchTerm,
-									mode: Prisma.QueryMode.insensitive,
-								},
+						},
+						{
+							cpf: {
+								contains: searchTerm,
+								mode: Prisma.QueryMode.insensitive,
 							},
-						],
+						},
+					],
 			};
 
 			usersData = await prisma.user.findMany({
@@ -357,14 +367,14 @@ export class PrismaUserRepository implements IUserRepository {
 					subscriptions: !includePlans
 						? false
 						: {
-								include: {
-									plan: true,
-									car: true,
-								},
-								orderBy: {
-									createdAt: "desc",
-								},
+							include: {
+								plan: true,
+								car: true,
 							},
+							orderBy: {
+								createdAt: "desc",
+							},
+						},
 				},
 			});
 
@@ -377,9 +387,7 @@ export class PrismaUserRepository implements IUserRepository {
 		return { users, total: totalCount };
 	}
 
-	async getFirebaseTokensByType(
-		type: "USER" | "MANAGER" | "ALL",
-	): Promise<string[]> {
+	async getFirebaseTokensByType(type: "USER" | "MANAGER" | "ALL"): Promise<string[]> {
 		const users = await prisma.user.findMany({
 			where: {
 				deletedAt: null,
@@ -407,16 +415,11 @@ export class PrismaUserRepository implements IUserRepository {
 		});
 	}
 
-	async removeFirebaseToken(
-		userId: number,
-		firebaseToken: string,
-	): Promise<void> {
+	async removeFirebaseToken(userId: number, firebaseToken: string): Promise<void> {
 		const user = await prisma.user.findUnique({ where: { id: userId } });
 		if (!user) throw new Error("User not found");
 
-		const updatedTokens = (user.firebaseTokens ?? []).filter(
-			(token) => token !== firebaseToken,
-		);
+		const updatedTokens = (user.firebaseTokens ?? []).filter((token) => token !== firebaseToken);
 
 		await prisma.user.update({
 			where: { id: userId },
@@ -433,9 +436,7 @@ export class PrismaUserRepository implements IUserRepository {
 		return user?.firebaseTokens ?? [];
 	}
 
-	async findUsersWithExpiringSubscriptions(): Promise<
-		{ user: User; expiryDate: Date | null }[]
-	> {
+	async findUsersWithExpiringSubscriptions(): Promise<{ user: User; expiryDate: Date | null }[]> {
 		const upcomingExpiryDate = new Date();
 		upcomingExpiryDate.setDate(upcomingExpiryDate.getDate() + 7);
 

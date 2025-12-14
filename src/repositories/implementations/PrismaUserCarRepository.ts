@@ -5,10 +5,21 @@ import type { UpdateUserCarDTO } from "../../modules/userCar/dto/UpdateUserCarDT
 import type { IUserCarRepository } from "../interfaces/IUserCarRepository";
 
 export class PrismaUserCarRepository implements IUserCarRepository {
+	private normalizePlate(value: string): string {
+		return (value ?? "")
+			.trim()
+			.toUpperCase()
+			.replace(/[^A-Z0-9]/g, "");
+	}
+
 	async findByLicensePlate(licensePlate: string): Promise<UserCar | null> {
+		const normalized = this.normalizePlate(licensePlate);
+
+		if (!normalized) return null;
+
 		const carData = await prisma.car.findFirst({
 			where: {
-				licensePlate, // (Prisma field) -> mapeado para coluna plate
+				licensePlate: normalized, // Prisma field -> @map("plate")
 				deletedAt: null,
 			},
 		});
@@ -27,9 +38,15 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 	}
 
 	async create(data: UserCar): Promise<UserCar> {
+		const normalized = this.normalizePlate(data.licensePlate);
+
+		if (!normalized || normalized.length !== 7) {
+			throw new AppError("Placa inválida", 400);
+		}
+
 		const createdCar = await prisma.car.create({
 			data: {
-				licensePlate: data.licensePlate, // (Prisma field) -> coluna plate
+				licensePlate: normalized,
 				color: data.color,
 				model: data.model,
 				brand: data.brand,
@@ -94,7 +111,6 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 	}
 
 	async update(carId: number, data: UpdateUserCarDTO): Promise<UserCar> {
-		// Garante que não atualiza carro deletado (e evita "where unique com deletedAt")
 		const existing = await prisma.car.findFirst({
 			where: { id: carId, deletedAt: null },
 		});
@@ -103,10 +119,36 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 			throw new AppError("Carro não encontrado", 404);
 		}
 
+		let normalizedPlate: string | undefined = undefined;
+
+		if (data.licensePlate) {
+			normalizedPlate = this.normalizePlate(data.licensePlate);
+
+			if (normalizedPlate.length !== 7) {
+				throw new AppError("Placa inválida", 400);
+			}
+
+			const conflict = await prisma.car.findFirst({
+				where: {
+					deletedAt: null,
+					licensePlate: normalizedPlate,
+					NOT: { id: carId },
+				},
+				select: { id: true, userId: true },
+			});
+
+			if (conflict) {
+				throw new AppError(
+					"Já existe um carro ativo cadastrado com esta placa",
+					409,
+				);
+			}
+		}
+
 		const updatedCar = await prisma.car.update({
 			where: { id: carId },
 			data: {
-				licensePlate: data.licensePlate ?? undefined,
+				licensePlate: normalizedPlate ?? undefined,
 				color: data.color ?? undefined,
 				model: data.model ?? undefined,
 				brand: data.brand ?? undefined,
@@ -127,7 +169,6 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 	}
 
 	async delete(carId: number): Promise<void> {
-		// Garante idempotência e mensagem clara
 		const existing = await prisma.car.findFirst({
 			where: { id: carId, deletedAt: null },
 			select: { id: true },
