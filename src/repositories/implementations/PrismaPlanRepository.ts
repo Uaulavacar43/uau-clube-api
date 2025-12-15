@@ -10,7 +10,7 @@ import type { IPlanRepository } from "../interfaces/IPlanRepository";
 
 export class PrismaPlanRepository implements IPlanRepository {
 	private mapWashServices(services: any[]): WashService[] {
-		return services.map((service) => ({
+		return (services ?? []).map((service) => ({
 			id: service.id,
 			name: service.name,
 			price: service.price,
@@ -19,55 +19,95 @@ export class PrismaPlanRepository implements IPlanRepository {
 		}));
 	}
 
+	private async assertWashServicesExist(washServiceIds: number[]): Promise<void> {
+		if (!washServiceIds || washServiceIds.length === 0) return;
+
+		const existingServices = await prisma.washService.findMany({
+			where: {
+				id: {
+					in: washServiceIds,
+				},
+			},
+			select: { id: true },
+		});
+
+		if (existingServices.length !== washServiceIds.length) {
+			const foundIds = existingServices.map((service) => service.id);
+			const missingIds = washServiceIds.filter((id) => !foundIds.includes(id));
+
+			throw new AppError(
+				`Serviços não encontrados: ${missingIds.join(", ")}`,
+				400,
+			);
+		}
+	}
+
 	async create(data: Plan & { washServiceIds?: number[] }): Promise<Plan> {
 		const { washServiceIds, ...planData } = data;
 
 		if (washServiceIds && washServiceIds.length > 0) {
-			// Verifica se todos os serviços existem
-			const existingServices = await prisma.washService.findMany({
-				where: {
-					id: {
-						in: washServiceIds,
-					},
-				},
-			});
-
-			if (existingServices.length !== washServiceIds.length) {
-				const foundIds = existingServices.map((service) => service.id);
-				const missingIds = washServiceIds.filter(
-					(id) => !foundIds.includes(id),
-				);
-				throw new AppError(
-					`Serviços não encontrados: ${missingIds.join(", ")}`,
-					400,
-				);
-			}
+			await this.assertWashServicesExist(washServiceIds);
 		}
 
-		const { washServices, ...restPlanData } = planData;
+		/**
+		 * CRÍTICO:
+		 * Nunca repassar `id` (ex.: id: 0), nem createdAt/updatedAt, nem washServices
+		 * para o Prisma no create. O Prisma deve autogerar o ID.
+		 */
+		const {
+			id: _id,
+			createdAt: _createdAt,
+			updatedAt: _updatedAt,
+			washServices: _washServices,
+			...restPlanData
+		} = planData as any;
 
-		const createdPlan = await prisma.plan.create({
-			data: {
-				...restPlanData,
-				...(washServiceIds && washServiceIds.length > 0
-					? {
+		try {
+			const createdPlan = await prisma.plan.create({
+				data: {
+					...restPlanData,
+					...(washServiceIds && washServiceIds.length > 0
+						? {
 							washServices: {
 								connect: washServiceIds.map((id) => ({ id })),
 							},
 						}
-					: {}),
-				id: undefined,
-			},
-			include: {
-				washServices: true,
-			},
-		});
+						: {}),
+				},
+				include: {
+					washServices: true,
+				},
+			});
 
-		return new Plan({
-			...createdPlan,
-			periodicityType: createdPlan.periodicityType as PeriodicityType,
-			washServices: this.mapWashServices(createdPlan.washServices ?? []),
-		});
+			return new Plan({
+				...createdPlan,
+				periodicityType: createdPlan.periodicityType as PeriodicityType,
+				washServices: this.mapWashServices(createdPlan.washServices ?? []),
+			});
+		} catch (error: any) {
+			/**
+			 * Se alguém ainda tentar forçar ID, isso geralmente vira P2002 em id.
+			 * Transformamos em mensagem clara.
+			 */
+			if (error?.code === "P2002") {
+				const target = error?.meta?.target;
+				if (Array.isArray(target) && target.includes("id")) {
+					throw new AppError(
+						"Erro ao criar plano: o campo 'id' não pode ser enviado no create (autoincrement). Garanta que nenhum 'id' esteja sendo passado (ex.: id: 0).",
+						500,
+					);
+				}
+
+				throw new AppError(
+					`Erro de unicidade ao criar plano (P2002). Meta=${JSON.stringify(
+						error?.meta ?? {},
+					)}`,
+					500,
+				);
+			}
+
+			throw error;
+		}
 	}
 
 	async findAll(): Promise<Plan[]> {
@@ -112,6 +152,10 @@ export class PrismaPlanRepository implements IPlanRepository {
 	): Promise<Plan> {
 		const { washServiceIds, ...planData } = data;
 
+		if (washServiceIds && washServiceIds.length > 0) {
+			await this.assertWashServicesExist(washServiceIds);
+		}
+
 		const updateData: Prisma.PlanUpdateInput = {
 			...planData,
 			...(washServiceIds !== undefined && {
@@ -119,8 +163,8 @@ export class PrismaPlanRepository implements IPlanRepository {
 					set: [],
 					...(washServiceIds.length > 0
 						? {
-								connect: washServiceIds.map((id) => ({ id })),
-							}
+							connect: washServiceIds.map((id) => ({ id })),
+						}
 						: {}),
 				},
 			}),

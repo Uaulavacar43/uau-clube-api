@@ -23,6 +23,23 @@ const RUN_ASAAS_TESTS = (process.env.RUN_ASAAS_TESTS || "false").toLowerCase() =
 const RUN_AVULSO_TESTS = (process.env.RUN_AVULSO_TESTS || "false").toLowerCase() === "true";
 const RUN_WEBHOOK_TESTS = (process.env.RUN_WEBHOOK_TESTS || "false").toLowerCase() === "true";
 
+/**
+ * NOVO: testes do “Caso Leo / Migração” (sem depender de ASAAS real):
+ * - Semeia no banco (via Prisma) um pagamento PAID + subscription SUSPENDED sem carId
+ * - Cria um carro via API
+ * - Valida que o fluxo “ensureSubscriptionWhenCarAdded” vinculou a subscription ao carro
+ *
+ * ATENÇÃO:
+ * - Requer @prisma/client instalado e DATABASE_URL válido
+ * - Recomendado rodar só em ambiente DEV
+ */
+const RUN_LEO_CASE_TESTS = (process.env.RUN_LEO_CASE_TESTS || "false").toLowerCase() === "true";
+
+/**
+ * NOVO: testes de regras de domínio que NÃO devem bater no ASAAS (validações locais).
+ */
+const RUN_DOMAIN_RULE_TESTS = (process.env.RUN_DOMAIN_RULE_TESTS || "true").toLowerCase() === "true";
+
 const ASAAS_ACCESS_TOKEN = process.env.ASAAS_ACCESS_TOKEN || "";
 
 const WASH_SERVICE_IDS = (process.env.WASH_SERVICE_IDS || "")
@@ -254,6 +271,13 @@ async function findMyCarByPlate(userToken, plate) {
     return cars.find((c) => normalizePlate(c?.licensePlate) === wanted) || null;
 }
 
+async function listMySubscriptions(userToken) {
+    const r = await http("/subscription", { method: "GET", token: userToken });
+    if (!r.ok) return [];
+    const list = unwrapCustomJson(r.data);
+    return Array.isArray(list) ? list : [];
+}
+
 function isAlreadyRegisteredMessage(payload) {
     const raw = payload && typeof payload === "object" ? payload : null;
     const message =
@@ -401,6 +425,126 @@ async function updatePlanWithFallback(adminToken, plan) {
     );
 }
 
+/**
+ * Prisma helpers (para RUN_LEO_CASE_TESTS)
+ */
+async function prismaGetClient() {
+    try {
+        const { PrismaClient } = require("@prisma/client");
+        return new PrismaClient();
+    } catch (e) {
+        throw new Error(
+            `RUN_LEO_CASE_TESTS requer @prisma/client instalado.\nMotivo: ${e?.message || e}`
+        );
+    }
+}
+
+async function prismaFindUserByEmail(email) {
+    const prisma = await prismaGetClient();
+    try {
+        const user = await prisma.user.findUnique({ where: { email } });
+        if (!user) throw new Error(`Usuário não encontrado no banco para email=${email}`);
+        return user;
+    } finally {
+        await prisma.$disconnect().catch(() => void 0);
+    }
+}
+
+async function prismaSeedLegacySubscriptionAndPaidPayment({ userId, plan, runId }) {
+    const prisma = await prismaGetClient();
+    const now = new Date();
+    const pastStart = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 10); // 10 dias atrás
+    const pastExpires = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 2); // expirado (2 dias atrás)
+
+    const paymentIdAsaas = `LEGACY_PAY_${runId}_${crypto.randomUUID()}`.slice(0, 60);
+
+    try {
+        // 1) cria subscription “importada” (SUSPENDED, sem carId)
+        const legacySub = await prisma.subscription.create({
+            data: {
+                userId,
+                planId: plan.id,
+                planType: plan.periodicityType || "MONTH",
+                amount: Number(plan.price ?? 10),
+                isActive: false,
+                startDate: pastStart,
+                expiresAt: pastExpires,
+                endDate: pastExpires,
+                carId: null,
+                paymentMethod: "PIX",
+                couponId: null,
+                subscriptionStatus: "SUSPENDED",
+                subscriptionIdAsaas: null,
+                installmentIdAsaas: null,
+            },
+        });
+
+        // 2) cria payment PAID “importado” (para reativar/calcular validade)
+        const legacyPay = await prisma.payment.create({
+            data: {
+                userId,
+                planId: plan.id,
+                amount: Number(plan.price ?? 10),
+                status: "PAID",
+                paymentDate: now,
+                createdAt: now,
+                updatedAt: now,
+                paymentIdAsaas,
+                couponId: null,
+                pixQrCode: null,
+                pixPayload: null,
+                paymentMethodId: "PIX",
+                installments: null,
+            },
+        });
+
+        console.log("[INFO] Seed (Caso Leo) criado no DB:", {
+            subscriptionId: legacySub.id,
+            paymentId: legacyPay.id,
+            paymentIdAsaas: legacyPay.paymentIdAsaas,
+            planId: plan.id,
+            userId,
+        });
+
+        return { legacySubscriptionId: legacySub.id, legacyPaymentId: legacyPay.id };
+    } catch (e) {
+        throw new Error(
+            `Falha ao semear dados (Caso Leo) via Prisma.\nMotivo: ${e?.message || e}`
+        );
+    } finally {
+        await prisma.$disconnect().catch(() => void 0);
+    }
+}
+
+async function prismaReadSubscriptionById(id) {
+    const prisma = await prismaGetClient();
+    try {
+        const sub = await prisma.subscription.findUnique({ where: { id } });
+        return sub;
+    } finally {
+        await prisma.$disconnect().catch(() => void 0);
+    }
+}
+
+async function prismaCleanupLegacySeed({ legacySubscriptionId, legacyPaymentId }) {
+    const prisma = await prismaGetClient();
+    try {
+        // ordem: payment -> subscription (normalmente)
+        if (legacyPaymentId) {
+            await prisma.payment.delete({ where: { id: legacyPaymentId } }).catch((e) => {
+                console.log("[WARN] Cleanup: falha ao deletar payment:", e?.message || e);
+            });
+        }
+        if (legacySubscriptionId) {
+            await prisma.subscription.delete({ where: { id: legacySubscriptionId } }).catch((e) => {
+                console.log("[WARN] Cleanup: falha ao deletar subscription:", e?.message || e);
+            });
+        }
+    } finally {
+        await prisma.$disconnect().catch(() => void 0);
+    }
+}
+
 (async function main() {
     if (!ALLOW_NON_LOCAL && !isLocalUrl(BASE_URL)) {
         throw new Error(
@@ -428,7 +572,12 @@ async function updatePlanWithFallback(adminToken, plan) {
     // 3) Planos: criar/buscar/atualizar (ADMIN)
     const createdPlan = await step("Planos: criar (ADMIN)", async () => {
         const plan = await createPlanWithFallback(adminToken, runId);
-        console.log("Plano criado:", { id: plan.id, name: plan.name, isPackage: plan.isPackage });
+        console.log("Plano criado:", {
+            id: plan.id,
+            name: plan.name,
+            isPackage: plan.isPackage,
+            periodicityType: plan.periodicityType,
+        });
         return plan;
     });
 
@@ -443,6 +592,23 @@ async function updatePlanWithFallback(adminToken, plan) {
         const updated = await updatePlanWithFallback(adminToken, createdPlan);
         console.log("Plano atualizado:", { id: updated.id, name: updated.name });
     });
+
+    // 3.1) (NOVO) Caso Leo / Migração: semear no DB uma subscription SUSPENDED sem carro + payment PAID
+    // para validar o "ensureSubscriptionWhenCarAdded" ao criar carro.
+    let legacySeed = { legacySubscriptionId: null, legacyPaymentId: null };
+    if (RUN_LEO_CASE_TESTS) {
+        await step("Caso Leo (DB): seed subscription SUSPENDED sem carro + payment PAID", async () => {
+            assert(USER_EMAIL, "USER_EMAIL não configurado no .env.smoke");
+            const user = await prismaFindUserByEmail(USER_EMAIL);
+            legacySeed = await prismaSeedLegacySubscriptionAndPaidPayment({
+                userId: user.id,
+                plan: createdPlan,
+                runId,
+            });
+        });
+    } else {
+        console.log("\n[INFO] RUN_LEO_CASE_TESTS=false => pulando seed/validação do Caso Leo (migração).");
+    }
 
     // 4) Carros: criar/listar/update (USER)
     const createdCar = await step("User-Car: registrar carro (USER)", async () => {
@@ -473,6 +639,105 @@ async function updatePlanWithFallback(adminToken, plan) {
         assert(car?.id === createdCar.id, "Update retornou carro com ID inesperado");
     });
 
+    // 4.1) (NOVO) Caso Leo: validar que a criação do carro vinculou a subscription seed ao carId
+    if (RUN_LEO_CASE_TESTS) {
+        await step("Caso Leo: verificar vinculação subscription->car ao criar carro (ensureSubscriptionWhenCarAdded)", async () => {
+            assert(legacySeed.legacySubscriptionId, "legacySubscriptionId ausente (seed não criado?)");
+
+            // 1) via API (se /subscription listar tudo)
+            const subs = await listMySubscriptions(userToken);
+            const foundApi = subs.find((s) => Number(s?.id) === Number(legacySeed.legacySubscriptionId)) || null;
+
+            if (foundApi) {
+                console.log("[INFO] Subscription encontrada via API /subscription:", {
+                    id: foundApi.id,
+                    carId: foundApi.carId,
+                    isActive: foundApi.isActive,
+                    subscriptionStatus: foundApi.subscriptionStatus,
+                    planId: foundApi.planId,
+                    planType: foundApi.planType,
+                    expiresAt: foundApi.expiresAt,
+                });
+            } else {
+                console.log("[WARN] Subscription do seed não apareceu via API /subscription (pode ser filtro do endpoint).");
+            }
+
+            // 2) via Prisma (fonte de verdade do vínculo)
+            const dbSub = await prismaReadSubscriptionById(legacySeed.legacySubscriptionId);
+            assert(dbSub, "Não encontrei subscription seed no banco após criar o carro.");
+
+            console.log("[INFO] Subscription no DB após criar carro:", {
+                id: dbSub.id,
+                carId: dbSub.carId,
+                isActive: dbSub.isActive,
+                subscriptionStatus: dbSub.subscriptionStatus,
+                planId: dbSub.planId,
+                planType: dbSub.planType,
+                startDate: dbSub.startDate,
+                expiresAt: dbSub.expiresAt,
+                endDate: dbSub.endDate,
+            });
+
+            assert(
+                Number(dbSub.carId) === Number(createdCar.id),
+                `Esperado subscription.carId=${createdCar.id}, mas veio ${dbSub.carId}`
+            );
+
+            // Se seu updateSubscriptionValidityFromPayment estiver funcionando, tende a reativar e recalcular validade
+            assert(
+                dbSub.subscriptionStatus === "ACTIVE" || dbSub.subscriptionStatus === "SUSPENDED" || dbSub.subscriptionStatus === "CANCELED",
+                `subscriptionStatus inesperado: ${dbSub.subscriptionStatus}`
+            );
+
+            // Para este caso específico (seed SUSPENDED + payment PAID agora), esperamos ACTIVE
+            assert(
+                dbSub.subscriptionStatus === "ACTIVE" && dbSub.isActive === true,
+                `Esperado subscription ativa após vincular (ACTIVE/isActive=true). Veio ${dbSub.subscriptionStatus}/${dbSub.isActive}`
+            );
+        });
+    }
+
+    // 4.2) (NOVO) Regras de domínio locais: plano mensal NÃO permite installments > 1 (deve falhar antes do ASAAS)
+    if (RUN_DOMAIN_RULE_TESTS) {
+        await step("Regra: plano mensal não permite installments>1 (POST /payment/subscribe deve retornar 400)", async () => {
+            // este teste só faz sentido para plano MONTH
+            const periodicity = String(createdPlan.periodicityType || "MONTH").toUpperCase();
+            if (periodicity !== "MONTH") {
+                console.log("[INFO] Plano criado não é MONTH. Pulando teste de installments mensal.");
+                return;
+            }
+
+            await ensureUserCpfFromDbIfMissing(USER_EMAIL);
+            if (!USER_CPF) {
+                console.log("[WARN] USER_CPF vazio; pulando teste de installments mensal (set USER_CPF no .env.smoke).");
+                return;
+            }
+
+            const body = {
+                plan_id: createdPlan.id,
+                carId: createdCar.id,
+                type: "pix",
+                cpf: USER_CPF,
+                timeZoneOffset: -180,
+                installments: 2,
+            };
+
+            const r = await http("/payment/subscribe", { method: "POST", token: userToken, body });
+
+            assert(
+                r.status === 400 || r.status === 422,
+                `Esperado erro 400/422 para installments mensal. Veio status=${r.status}\nBody=${safeJsonStringify(r.data)}`
+            );
+
+            console.log("[INFO] Resposta esperada (installments mensal bloqueado):", {
+                status: r.status,
+                body: unwrapCustomJson(r.data),
+            });
+        });
+    } else {
+        console.log("\n[INFO] RUN_DOMAIN_RULE_TESTS=false => pulando testes de validação local.");
+    }
+
     // 5) Assinatura via pagamento (opcional)
     if (RUN_ASAAS_TESTS) {
         await ensureUserCpfFromDbIfMissing(USER_EMAIL);
@@ -492,13 +757,36 @@ async function updatePlanWithFallback(adminToken, plan) {
 
             const out = unwrapCustomJson(r.data);
             const subscription = out?.subscription || out?.data?.subscription || out;
+            const payment = out?.payment || out?.data?.payment || null;
+
             assert(subscription?.id, "Subscribe não retornou subscription.id");
+
+            // validação chave do que vocês ajustaram: planType deve ser o PeriodicityType interno (MONTH, YEAR, etc.)
+            const planType = String(subscription.planType || "").toUpperCase();
+            const periodicityType = String(createdPlan.periodicityType || "").toUpperCase();
+
+            if (periodicityType) {
+                assert(
+                    planType === periodicityType,
+                    `planType inconsistente: subscription.planType=${subscription.planType} vs plan.periodicityType=${createdPlan.periodicityType}`
+                );
+            }
+
+            // não deve persistir strings do ASAAS tipo MONTHLY/YEARLY etc.
+            assert(
+                !["MONTHLY", "YEARLY", "QUARTERLY", "SEMIANNUALLY", "WEEKLY"].includes(planType),
+                `planType parece string externa do ASAAS (não deveria persistir): ${subscription.planType}`
+            );
 
             console.log("Subscription criada:", {
                 id: subscription.id,
                 isActive: subscription.isActive,
                 status: subscription.subscriptionStatus,
+                planType: subscription.planType,
                 expiresAt: subscription.expiresAt,
+                hasPayment: !!payment,
+                paymentStatus: payment?.status,
+                paymentIdAsaas: payment?.paymentIdAsaas,
             });
         });
 
@@ -510,13 +798,13 @@ async function updatePlanWithFallback(adminToken, plan) {
             console.log(`Total subscriptions do usuário: ${list.length}`);
         });
     } else {
-        console.log("\n[INFO] RUN_ASAAS_TESTS=false => pulando /payment/subscribe e /subscription.");
+        console.log("\n[INFO] RUN_ASAAS_TESTS=false => pulando /payment/subscribe e /subscription (ASAAS real).");
     }
 
     // 6) Pagamento avulso (opcional)
     if (RUN_AVULSO_TESTS) {
         await ensureUserCpfFromDbIfMissing(USER_EMAIL);
-        assert(USER_CPF, "USER_CPF está vazio. Sete no .env.smoke ou garanta cpf no banco.");
+        assert(USER_CPF, "USER_CPF está vazio. Sete USER_CPF no .env.smoke ou garanta cpf no banco.");
         assert(WASH_SERVICE_IDS.length > 0, "Defina WASH_SERVICE_IDS no .env.smoke para RUN_AVULSO_TESTS=true.");
 
         await step("Payment avulso: POST /payment", async () => {
@@ -572,6 +860,13 @@ async function updatePlanWithFallback(adminToken, plan) {
 
     // 9) Cleanup (opcional)
     if (CLEANUP) {
+        if (RUN_LEO_CASE_TESTS && (legacySeed.legacySubscriptionId || legacySeed.legacyPaymentId)) {
+            await step("Cleanup: apagar seed Caso Leo (payment/subscription)", async () => {
+                await prismaCleanupLegacySeed(legacySeed);
+                console.log("Seed Caso Leo removido (best-effort).");
+            });
+        }
+
         await step("Cleanup: deletar carro (pode falhar se tiver plano ativo)", async () => {
             const r = await http(`/user-car/${createdCar.id}`, { method: "DELETE", token: userToken });
             if (r.status === 204 || r.ok) {

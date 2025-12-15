@@ -1,11 +1,19 @@
-// src/entities/Subscription.ts
-
 import type { Coupon } from "./Coupon";
 import { PeriodicityType, type Plan } from "./Plan";
 import type { UserCar } from "./UserCar";
 
 export type SubscriptionStatus = "ACTIVE" | "SUSPENDED" | "CANCELED";
 
+/**
+ * Entidade de domínio: Subscription
+ *
+ * IMPORTANTE (regra de ouro):
+ * - `isActive` é um campo persistido (cache / legado / histórico).
+ * - A FONTE DE VERDADE para regras de negócio é o método:
+ *   👉 isCurrentlyActive()
+ *
+ * Nenhuma regra de negócio deve depender diretamente de `isActive`.
+ */
 export class Subscription {
     public id: number;
     public userId: number;
@@ -13,7 +21,12 @@ export class Subscription {
     public planId?: number;
     public planType: PeriodicityType;
     public amount: number;
+
+    /**
+     * Campo persistido (não confiar para regra de negócio).
+     */
     public isActive: boolean;
+
     public startDate: Date;
     public endDate: Date | null;
     public createdAt: Date;
@@ -22,10 +35,12 @@ export class Subscription {
     public paymentMethod: string;
     public subscriptionIdAsaas: string | null;
     public installmentIdAsaas: string | null;
+
     public couponId?: number | null;
     public coupon?: Coupon | null;
     public car?: UserCar | null;
     public plan?: Plan | null;
+
     public subscriptionStatus: SubscriptionStatus;
 
     constructor(data: {
@@ -70,5 +85,48 @@ export class Subscription {
         this.car = data.car ?? null;
         this.plan = data.plan ?? null;
         this.subscriptionStatus = data.subscriptionStatus;
+    }
+
+    // ------------------------------------------------------------------
+    // REGRAS DE DOMÍNIO (fonte de verdade)
+    // ------------------------------------------------------------------
+
+    /**
+     * Fonte de verdade para saber se a assinatura está ATIVA agora.
+     *
+     * Uma assinatura é considerada ativa quando:
+     * - subscriptionStatus === "ACTIVE"
+     * - expiresAt existe
+     * - expiresAt é maior que a data de referência (default: agora)
+     */
+    public isCurrentlyActive(referenceDate: Date = new Date()): boolean {
+        if (this.subscriptionStatus !== "ACTIVE") {
+            return false;
+        }
+
+        if (!this.expiresAt) {
+            return false;
+        }
+
+        return this.expiresAt.getTime() > referenceDate.getTime();
+    }
+
+    /**
+     * Indica se a assinatura está expirada por tempo.
+     * Não considera cancelamento explícito.
+     */
+    public isExpired(referenceDate: Date = new Date()): boolean {
+        if (!this.expiresAt) {
+            return false;
+        }
+
+        return this.expiresAt.getTime() <= referenceDate.getTime();
+    }
+
+    /**
+     * Indica se a assinatura foi cancelada explicitamente.
+     */
+    public isCanceled(): boolean {
+        return this.subscriptionStatus === "CANCELED";
     }
 }
