@@ -7,7 +7,13 @@ import {
 } from "@prisma/client";
 import prisma from "../../config/dbConfig";
 import { User } from "../../entities/User";
-import type { IFilterGetAll, IUserRepository } from "../interfaces/IUserRepository";
+import type {
+	AttachReferralResult,
+	CreateUserReferralInput,
+	IFilterGetAll,
+	IUserRepository,
+	ReferralRequestContext,
+} from "../interfaces/IUserRepository";
 
 interface UserWithSubscriptions extends PrismaUser {
 	subscriptions?: PrismaSubscription[];
@@ -24,9 +30,16 @@ export class PrismaUserRepository implements IUserRepository {
 			.replace(/[^A-Z0-9]/g, "");
 	}
 
+	private normalizeReferralCode(value: string): string {
+		return (value ?? "").trim().toUpperCase();
+	}
+
 	async findByEmail(email: string, withIsDeleted = false): Promise<User | null> {
-		const userData = await prisma.user.findUnique({
-			where: { email, deletedAt: !withIsDeleted ? null : undefined },
+		const userData = await prisma.user.findFirst({
+			where: {
+				email,
+				deletedAt: !withIsDeleted ? null : undefined,
+			},
 		});
 		if (!userData) return null;
 		return this.mapToEntity(userData);
@@ -34,9 +47,14 @@ export class PrismaUserRepository implements IUserRepository {
 
 	async findByCpf(cpf: string | null, withIsDeleted = false): Promise<User | null> {
 		if (!cpf) return null;
-		const userData = await prisma.user.findUnique({
-			where: { cpf, deletedAt: !withIsDeleted ? null : undefined },
+
+		const userData = await prisma.user.findFirst({
+			where: {
+				cpf,
+				deletedAt: !withIsDeleted ? null : undefined,
+			},
 		});
+
 		if (!userData) return null;
 		return this.mapToEntity(userData);
 	}
@@ -108,16 +126,18 @@ export class PrismaUserRepository implements IUserRepository {
 			deletedAt: undefined,
 			firebaseTokens: undefined,
 			otp: undefined,
-			// individualServicePurchases: undefined,
 			asaasCustomerId: undefined,
 			role: undefined,
 			cpf: undefined,
 		};
 	}
 
-	async findById(id: number) {
-		const userData = await prisma.user.findUnique({
-			where: { id, deletedAt: null },
+	async findById(id: number, withIsDeleted = false): Promise<User | null> {
+		const userData = await prisma.user.findFirst({
+			where: {
+				id,
+				deletedAt: !withIsDeleted ? null : undefined,
+			},
 			include: {
 				subscriptions: {
 					where: {
@@ -134,7 +154,7 @@ export class PrismaUserRepository implements IUserRepository {
 
 		if (!userData) return null;
 
-		return userData;
+		return this.mapToEntity(userData);
 	}
 
 	async create(user: User): Promise<User> {
@@ -147,8 +167,12 @@ export class PrismaUserRepository implements IUserRepository {
 				phone: user.phone || "default-phone",
 				cpf: user.cpf ?? undefined,
 				profileImageUrl: user.profileImageUrl ?? undefined,
-				firebaseTokens: [], // Inicializa a lista de tokens vazia
+				firebaseTokens: user.firebaseTokens ?? [],
 				otp: user.otp ?? undefined,
+
+				// REFERRALS (FASE 1/2/3)
+				referralCode: (user as any).referralCode ?? undefined,
+				referrerId: (user as any).referrerId ?? undefined,
 			},
 		});
 
@@ -169,6 +193,10 @@ export class PrismaUserRepository implements IUserRepository {
 				otp: data.otp ?? undefined,
 				status: data.status ?? undefined,
 				deletedAt: data.deletedAt ?? undefined,
+
+				// REFERRALS (FASE 1/2/3)
+				referralCode: (data as any).referralCode ?? undefined,
+				referrerId: (data as any).referrerId ?? undefined,
 			},
 		});
 
@@ -186,7 +214,7 @@ export class PrismaUserRepository implements IUserRepository {
 		const usersData = await prisma.user.findMany({
 			where: { deletedAt: null },
 		});
-		return usersData.map(this.mapToEntity);
+		return usersData.map((u) => this.mapToEntity(u));
 	}
 
 	async findAllByRole(
@@ -200,7 +228,7 @@ export class PrismaUserRepository implements IUserRepository {
 			take,
 		});
 
-		const users = usersData.map(this.mapToEntity);
+		const users = usersData.map((u) => this.mapToEntity(u));
 		const total = await prisma.user.count({
 			where: { role, deletedAt: null },
 		});
@@ -236,12 +264,8 @@ export class PrismaUserRepository implements IUserRepository {
 		let totalCount: number;
 
 		if (orderBy === "lastPaymentDate") {
-			// Buscar usuários ordenados pela data do pagamento mais recente
-			// Usando uma subconsulta para ordenar corretamente
-			// Preparar a condição de roles para SQL raw
 			let rolesCondition = Prisma.empty;
 			if (roles && roles.length > 0) {
-				// Converter os roles para string e adicionar aspas para a consulta SQL
 				const roleValues = roles.map((role) => `'${role}'`).join(", ");
 				rolesCondition = Prisma.sql`AND u."role"::text IN (${Prisma.raw(roleValues)})`;
 			}
@@ -255,32 +279,30 @@ export class PrismaUserRepository implements IUserRepository {
 				  AND p."status" = 'PAID'
 					${rolesCondition}
 					${
-						searchTerm
-							? Prisma.sql`AND (
+				searchTerm
+					? Prisma.sql`AND (
 					u."name" ILIKE ${`%${searchTerm}%`} OR
 					u."email" ILIKE ${`%${searchTerm}%`} OR
 					u."phone" ILIKE ${`%${searchTerm}%`} OR
-					u."cpf" ILIKE ${`%${searchTerm}%`}
+					u."cpf" ILIKE ${`%${searchTerm}%`} OR
+					u."referralCode" ILIKE ${`%${searchTerm}%`}
 				)`
-							: Prisma.empty
-					}
+					: Prisma.empty
+			}
 				GROUP BY u.id
 				ORDER BY "lastPaymentDate" ${
-											   orderDirection === "desc"
-												   ? Prisma.sql`DESC NULLS LAST`
-												   : Prisma.sql`ASC NULLS FIRST`
-										   }
+				orderDirection === "desc"
+					? Prisma.sql`DESC NULLS LAST`
+					: Prisma.sql`ASC NULLS FIRST`
+			}
 					LIMIT ${take} OFFSET ${skip}
 			`;
 
-			// Converter os resultados para o formato esperado
 			usersData = usersWithLatestPayment.map((user) => {
-				// Remover o campo lastPaymentDate que foi adicionado na consulta
 				const { lastPaymentDate: _, ...userData } = user;
 				return userData;
 			});
 
-			// Contar o total de registros com a mesma condição
 			const totalResult = await prisma.$queryRaw<[{ count: bigint }]>`
 				SELECT COUNT(DISTINCT u.id) as count
 				FROM "User" u
@@ -289,18 +311,18 @@ export class PrismaUserRepository implements IUserRepository {
 				  AND p."status" = 'PAID'
 					${rolesCondition}
 					${
-						searchTerm
-							? Prisma.sql`AND (
+				searchTerm
+					? Prisma.sql`AND (
 					u."name" ILIKE ${`%${searchTerm}%`} OR
 					u."email" ILIKE ${`%${searchTerm}%`} OR
 					u."phone" ILIKE ${`%${searchTerm}%`} OR
-					u."cpf" ILIKE ${`%${searchTerm}%`}
+					u."cpf" ILIKE ${`%${searchTerm}%`} OR
+					u."referralCode" ILIKE ${`%${searchTerm}%`}
 				)`
-							: Prisma.empty
-					}
+					: Prisma.empty
+			}
 			`;
 
-			// Definir o total com o resultado da contagem
 			totalCount = Number(totalResult[0].count);
 
 			if (includePlans) {
@@ -327,7 +349,7 @@ export class PrismaUserRepository implements IUserRepository {
 
 			const where: Prisma.UserWhereInput = {
 				deletedAt: null,
-				role: { in: roles },
+				role: roles && roles.length > 0 ? { in: roles } : undefined,
 				OR: !searchTerm
 					? undefined
 					: [
@@ -355,6 +377,12 @@ export class PrismaUserRepository implements IUserRepository {
 								mode: Prisma.QueryMode.insensitive,
 							},
 						},
+						{
+							referralCode: {
+								contains: searchTerm,
+								mode: Prisma.QueryMode.insensitive,
+							},
+						},
 					],
 			};
 
@@ -378,11 +406,10 @@ export class PrismaUserRepository implements IUserRepository {
 				},
 			});
 
-			// Contar o total para outros tipos de ordenação
 			totalCount = await prisma.user.count({ where });
 		}
 
-		const users = usersData.map(this.mapToEntity);
+		const users = usersData.map((u) => this.mapToEntity(u));
 
 		return { users, total: totalCount };
 	}
@@ -419,7 +446,9 @@ export class PrismaUserRepository implements IUserRepository {
 		const user = await prisma.user.findUnique({ where: { id: userId } });
 		if (!user) throw new Error("User not found");
 
-		const updatedTokens = (user.firebaseTokens ?? []).filter((token) => token !== firebaseToken);
+		const updatedTokens = (user.firebaseTokens ?? []).filter(
+			(token) => token !== firebaseToken,
+		);
 
 		await prisma.user.update({
 			where: { id: userId },
@@ -428,7 +457,7 @@ export class PrismaUserRepository implements IUserRepository {
 	}
 
 	async getFirebaseTokensById(userId: number): Promise<string[]> {
-		const user = await prisma.user.findUnique({
+		const user = await prisma.user.findFirst({
 			where: { id: userId, deletedAt: null },
 			select: { firebaseTokens: true },
 		});
@@ -436,7 +465,9 @@ export class PrismaUserRepository implements IUserRepository {
 		return user?.firebaseTokens ?? [];
 	}
 
-	async findUsersWithExpiringSubscriptions(): Promise<{ user: User; expiryDate: Date | null }[]> {
+	async findUsersWithExpiringSubscriptions(): Promise<
+		{ user: User; expiryDate: Date | null }[]
+	> {
 		const upcomingExpiryDate = new Date();
 		upcomingExpiryDate.setDate(upcomingExpiryDate.getDate() + 7);
 
@@ -461,6 +492,10 @@ export class PrismaUserRepository implements IUserRepository {
 						profileImageUrl: true,
 						firebaseTokens: true,
 						otp: true,
+
+						// REFERRALS (FASE 1/2/3)
+						referralCode: true,
+						referrerId: true,
 					},
 				},
 			},
@@ -482,7 +517,236 @@ export class PrismaUserRepository implements IUserRepository {
 			},
 		});
 
-		return usersData.map(this.mapToEntity);
+		return usersData.map((u) => this.mapToEntity(u));
+	}
+
+	// ---------------------------------------------------------------------
+	// REFERRALS (FASE 1/2/3) — SUPORTE AO MÓDULO referrals + cadastro
+	// ---------------------------------------------------------------------
+
+	async findByReferralCode(
+		referralCode: string,
+		withIsDeleted = false,
+	): Promise<User | null> {
+		const code = this.normalizeReferralCode(referralCode);
+		if (!code) return null;
+
+		const userData = await prisma.user.findFirst({
+			where: {
+				referralCode: {
+					equals: code,
+					mode: Prisma.QueryMode.insensitive,
+				},
+				deletedAt: !withIsDeleted ? null : undefined,
+			},
+		});
+
+		if (!userData) return null;
+		return this.mapToEntity(userData);
+	}
+
+	async updateReferralCode(userId: number, referralCode: string): Promise<User> {
+		const code = this.normalizeReferralCode(referralCode);
+
+		const updatedUser = await prisma.user.update({
+			where: { id: userId },
+			data: { referralCode: code },
+		});
+
+		return this.mapToEntity(updatedUser);
+	}
+
+	async updateReferrerId(userId: number, referrerId: number | null): Promise<User> {
+		const updatedUser = await prisma.user.update({
+			where: { id: userId },
+			data: { referrerId },
+		});
+
+		return this.mapToEntity(updatedUser);
+	}
+
+	async createUserReferral(input: CreateUserReferralInput): Promise<void> {
+		await prisma.userReferral.create({
+			data: {
+				referrerId: input.referrerId,
+				referredId: input.referredId,
+				source: input.source as any,
+				deviceId: input.deviceId ?? null,
+				ip: input.ip ?? null,
+				userAgent: input.userAgent ?? null,
+				meta: (input.meta as any) ?? undefined,
+			},
+		});
+	}
+
+	async hasReferralReceived(referredId: number): Promise<boolean> {
+		const count = await prisma.userReferral.count({
+			where: { referredId },
+		});
+		return count > 0;
+	}
+
+	async hasReferrerAttached(referredId: number): Promise<boolean> {
+		const user = await prisma.user.findFirst({
+			where: { id: referredId },
+			select: { referrerId: true, deletedAt: true },
+		});
+
+		if (!user) return false;
+		if (user.deletedAt) return false;
+
+		return user.referrerId !== null && user.referrerId !== undefined;
+	}
+
+	/**
+	 * Implementação robusta e transacional do attachReferralOnSignup.
+	 *
+	 * - Resolve referrer pelo referralCode
+	 * - Bloqueia:
+	 *   - self-referral
+	 *   - referrer deletado/inativo
+	 *   - rebind (se já tem referrerId) e/ou já tem audit (UserReferral)
+	 * - Escreve:
+	 *   - User.referrerId
+	 *   - UserReferral (auditoria)
+	 */
+	async attachReferralOnSignup(params: {
+		referredId: number;
+		referralCode: string;
+		context: ReferralRequestContext;
+	}): Promise<AttachReferralResult> {
+		const referredId = params.referredId;
+		const code = this.normalizeReferralCode(params.referralCode);
+
+		if (!code) {
+			return {
+				attached: false,
+				reason: "NO_CODE",
+				referredId,
+				referrerId: null,
+				referralCodeUsed: null,
+			};
+		}
+
+		const referred = await prisma.user.findFirst({
+			where: { id: referredId },
+			select: { id: true, referrerId: true, deletedAt: true, status: true },
+		});
+
+		if (!referred || referred.deletedAt) {
+			return {
+				attached: false,
+				reason: "INVALID_CODE",
+				referredId,
+				referrerId: null,
+				referralCodeUsed: code,
+			};
+		}
+
+		// Bloqueia rebind direto pelo User.referrerId
+		if (referred.referrerId !== null && referred.referrerId !== undefined) {
+			return {
+				attached: false,
+				reason: "ALREADY_HAS_REFERRER",
+				referredId,
+				referrerId: referred.referrerId,
+				referralCodeUsed: code,
+			};
+		}
+
+		// Bloqueia se já existe auditoria (UserReferral)
+		const alreadyAudit = await prisma.userReferral.count({
+			where: { referredId },
+		});
+		if (alreadyAudit > 0) {
+			return {
+				attached: false,
+				reason: "ALREADY_HAS_REFERRAL_AUDIT",
+				referredId,
+				referrerId: null,
+				referralCodeUsed: code,
+			};
+		}
+
+		const referrer = await prisma.user.findFirst({
+			where: {
+				deletedAt: null,
+				referralCode: {
+					equals: code,
+					mode: Prisma.QueryMode.insensitive,
+				},
+			},
+			select: { id: true, status: true, deletedAt: true },
+		});
+
+		if (!referrer) {
+			return {
+				attached: false,
+				reason: "REFERRER_NOT_FOUND",
+				referredId,
+				referrerId: null,
+				referralCodeUsed: code,
+			};
+		}
+
+		if (referrer.deletedAt) {
+			return {
+				attached: false,
+				reason: "REFERRER_DELETED",
+				referredId,
+				referrerId: null,
+				referralCodeUsed: code,
+			};
+		}
+
+		if (referrer.status !== "ACTIVE") {
+			return {
+				attached: false,
+				reason: "REFERRER_INACTIVE",
+				referredId,
+				referrerId: null,
+				referralCodeUsed: code,
+			};
+		}
+
+		if (referrer.id === referredId) {
+			return {
+				attached: false,
+				reason: "SELF_REFERRAL_BLOCKED",
+				referredId,
+				referrerId: null,
+				referralCodeUsed: code,
+			};
+		}
+
+		const context = params.context;
+
+		await prisma.$transaction(async (tx) => {
+			await tx.user.update({
+				where: { id: referredId },
+				data: { referrerId: referrer.id },
+			});
+
+			await tx.userReferral.create({
+				data: {
+					referrerId: referrer.id,
+					referredId: referredId,
+					source: context.source as any,
+					deviceId: context.deviceId ?? null,
+					ip: context.ip ?? null,
+					userAgent: context.userAgent ?? null,
+					meta: (context.meta as any) ?? undefined,
+				},
+			});
+		});
+
+		return {
+			attached: true,
+			reason: "ATTACHED",
+			referredId,
+			referrerId: referrer.id,
+			referralCodeUsed: code,
+		};
 	}
 
 	private mapToEntity(userData: any): User {
@@ -508,6 +772,10 @@ export class PrismaUserRepository implements IUserRepository {
 			notifications: userData.notifications || [],
 			asaasCustomerId: userData.asaasCustomerId,
 			deletedAt: userData.deletedAt,
+
+			// REFERRALS (FASE 1/2/3)
+			referralCode: userData.referralCode,
+			referrerId: userData.referrerId,
 		});
 	}
 }

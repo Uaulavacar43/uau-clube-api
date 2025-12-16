@@ -20,6 +20,9 @@ import WashLocation from "./modules/washLocation/routes";
 // Asaas (sincronização clientes + pagamentos)
 import asaasRoutes from "./assas/asaas.routes";
 
+// ✅ Referrals (Fase 1)
+import referralsRoutes from "./modules/referrals/routes";
+
 const routes = Router();
 
 // Arquivos estáticos de upload
@@ -41,6 +44,9 @@ routes.use("/plans", plans);
 routes.use("/file-upload", fileUploadRoutes);
 routes.use("/docs", docsRoutes);
 routes.use("/coupons", couponRoutes);
+
+// ✅ Monta /referrals/*
+routes.use("/referrals", referralsRoutes);
 
 // Rotas de integração/sincronização com Asaas
 routes.use("/asaas", asaasRoutes);

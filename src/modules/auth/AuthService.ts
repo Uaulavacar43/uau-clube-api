@@ -1,6 +1,6 @@
 import { User } from "../../entities/User";
 import { AppError } from "../../error/AppError";
-import type { IUserRepository } from "../../repositories/interfaces/IUserRepository";
+import type { IUserRepository, ReferralRequestContext } from "../../repositories/interfaces/IUserRepository";
 import type { Mailer } from "../../third-party/Mailer";
 import { isValidCpf } from "../../utils/cpf";
 import { comparePassword, hashPassword } from "../../utils/password";
@@ -17,6 +17,17 @@ export class AuthService {
 	private readonly accessTokenExpiry = "8h";
 	private readonly refreshTokenExpiry = "3d";
 
+	/**
+	 * Register (com suporte a referrals - Fase 1):
+	 * - cria usuário
+	 * - se vier referrerCode (ou referralCode alias no DTO), tenta anexar:
+	 *   - preenche User.referrerId
+	 *   - cria UserReferral (auditoria)
+	 *
+	 * Observação:
+	 * - Para capturar deviceId/ip/userAgent, o ideal é o Controller passar esses dados.
+	 * - Para não quebrar assinatura agora, mantive esses campos como opcionais via data as any.
+	 */
 	public async register(
 		data: RegisterUserDTO,
 	): Promise<{ token: string; refreshToken: string; user: User }> {
@@ -41,7 +52,6 @@ export class AuthService {
 			}
 		}
 
-		// Verificar se já existe um usuário com o e-mail fornecido
 		const existingUserByEmail = await this.userRepository.findByEmail(
 			data.email,
 			true,
@@ -59,6 +69,7 @@ export class AuthService {
 
 		const hashedPassword = await hashPassword(data.password);
 
+		// 1) Cria o usuário normalmente
 		const user = await this.userRepository.create(
 			new User({
 				id: 0,
@@ -72,6 +83,72 @@ export class AuthService {
 			}),
 		);
 
+		const referrerCode = (data as any).referrerCode as string | undefined;
+
+		if (referrerCode && referrerCode.trim().length > 0) {
+			const context: ReferralRequestContext = {
+				source: "LINK",
+				deviceId: (data as any).deviceId ?? null,
+				ip: (data as any).ip ?? null,
+				userAgent: (data as any).userAgent ?? null,
+				meta: (data as any).referralMeta ?? undefined,
+			};
+
+			// Política robusta:
+			// - strictReferral=true => se veio código, referral deve aplicar ou falhar o cadastro
+			// - strictReferral=false => se falhar, loga e segue (soft-fail)
+			const strictReferral =
+				(process.env.REFERRALS_STRICT_ON_REGISTER ?? "true").toLowerCase() === "true";
+
+			try {
+				const attachResult = await this.userRepository.attachReferralOnSignup({
+					referredId: user.id,
+					referralCode: referrerCode,
+					context,
+				});
+
+				if (attachResult.attached && attachResult.referrerId) {
+					(user as any).referrerId = attachResult.referrerId;
+				} else {
+					// Se veio código e não anexou, isso é sinal de regra de negócio não atendida.
+					// Em modo estrito: falha. Em modo soft: loga.
+					const msg =
+						"Não foi possível anexar referral no cadastro (attachReferralOnSignup retornou attached=false).";
+
+					console.warn("[AuthService.register][referral] " + msg, {
+						referredId: user.id,
+						referrerCode: referrerCode,
+						result: attachResult,
+					});
+
+					if (strictReferral) {
+						throw new AppError("Código de indicação inválido", 400);
+					}
+				}
+			} catch (error) {
+				// Log SEM vazar dados sensíveis
+				console.error("[AuthService.register][referral] Falha ao anexar referral", {
+					referredId: user.id,
+					referrerCode: referrerCode,
+					errorName: error instanceof Error ? error.name : typeof error,
+					errorMessage: error instanceof Error ? error.message : String(error),
+				});
+
+				// Se você quer robustez e consistência, o ideal é: se veio código, não aceitar cadastro
+				// se falhou a aplicação do referral (exceto se você deliberadamente aceitar soft-fail).
+				if (strictReferral) {
+					if (error instanceof AppError) {
+						// Propaga erro de regra de negócio (400/404/etc.)
+						throw error;
+					}
+					throw new AppError("Erro ao processar código de indicação", 500);
+				}
+
+				// Soft-fail: segue cadastro sem referral
+			}
+		}
+
+		// 3) Emite tokens
 		const token = signToken(
 			{ id: user.id, role: user.role },
 			this.accessTokenExpiry,
@@ -121,7 +198,6 @@ export class AuthService {
 		userId: number,
 		firebaseToken: string,
 	): Promise<void> {
-		// Adiciona o token à lista
 		await this.userRepository.addFirebaseToken(userId, firebaseToken);
 	}
 
@@ -140,7 +216,6 @@ export class AuthService {
 		userId: number,
 		firebaseToken: string,
 	): Promise<void> {
-		// Remove o token da lista
 		await this.userRepository.removeFirebaseToken(userId, firebaseToken);
 	}
 

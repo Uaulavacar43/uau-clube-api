@@ -170,6 +170,27 @@ export class PaymentService {
             .replace(/[^A-Z0-9]/g, "");
     }
 
+    private normalizeOptionalString(value: unknown): string | undefined {
+        if (value === undefined || value === null) {
+            return undefined;
+        }
+
+        if (typeof value !== "string") {
+            return undefined;
+        }
+
+        const trimmed = value.trim();
+        if (trimmed.length === 0) {
+            return undefined;
+        }
+
+        return trimmed;
+    }
+
+    private resolvePaymentType(type: CreatePaymentDTO["type"]): "creditCard" | "pix" {
+        return (type ?? "creditCard") === "pix" ? "pix" : "creditCard";
+    }
+
     private mapAsaasPaymentStatusToInternal(
         status: ASAASPaymentStatusEnum,
     ): "PAID" | "PENDING" | "CANCELED" {
@@ -223,8 +244,30 @@ export class PaymentService {
             throw new AppError("Usuário não encontrado", 404);
         }
 
-        const cpf =
-            data.creditCardHolderInfo?.cpfCnpj ?? data.cpf ?? loggedUser.cpf;
+        const paymentType = this.resolvePaymentType(data.type);
+
+        const creditCard =
+            paymentType === "creditCard" ? data.creditCard : undefined;
+
+        const creditCardHolderInfo =
+            paymentType === "creditCard" ? data.creditCardHolderInfo : undefined;
+
+        if (paymentType === "creditCard" && !creditCard) {
+            throw new AppError("Faltam informações cartão", 400);
+        }
+
+        if (paymentType === "creditCard" && !creditCardHolderInfo) {
+            throw new AppError("Faltam informações do titular do cartão", 400);
+        }
+
+        const cpfFromHolder = this.normalizeOptionalString(
+            creditCardHolderInfo?.cpfCnpj,
+        );
+        const cpfFromPayload = this.normalizeOptionalString(data.cpf);
+        const cpfFromUser = this.normalizeOptionalString((loggedUser as any)?.cpf);
+
+        const cpf = cpfFromHolder ?? cpfFromPayload ?? cpfFromUser;
+
         if (!cpf) {
             throw new AppError(
                 "O CPF do usuário é obrigatório para efetuar a compra",
@@ -239,7 +282,7 @@ export class PaymentService {
         }
 
         const coupon = await this.validateCoupon(
-            data.coupon,
+            this.normalizeOptionalString(data.coupon),
             undefined,
             data.washServices,
         );
@@ -249,30 +292,49 @@ export class PaymentService {
             0,
         );
 
-        const billingTypes = new Map<
-            CreatePaymentDTO["type"],
-            ASAASPaymentBillingTypeEnum
-        >([
-            ["pix", ASAASPaymentBillingTypeEnum.PIX],
-            ["creditCard", ASAASPaymentBillingTypeEnum.CREDIT_CARD],
-        ]);
-        const billingType = billingTypes.get(data.type);
-        if (!billingType) {
-            throw new AppError("Tipo de pagamento inválido", 400);
+        const billingType =
+            paymentType === "pix"
+                ? ASAASPaymentBillingTypeEnum.PIX
+                : ASAASPaymentBillingTypeEnum.CREDIT_CARD;
+
+        const customerName =
+            this.normalizeOptionalString(creditCardHolderInfo?.name) ??
+            this.normalizeOptionalString((loggedUser as any)?.name);
+
+        const customerEmail =
+            this.normalizeOptionalString(creditCardHolderInfo?.email) ??
+            this.normalizeOptionalString((loggedUser as any)?.email);
+
+        if (!customerName) {
+            throw new AppError(
+                "O nome do usuário é obrigatório para efetuar a compra",
+                400,
+            );
         }
 
+        if (!customerEmail) {
+            throw new AppError(
+                "O e-mail do usuário é obrigatório para efetuar a compra",
+                400,
+            );
+        }
+
+        const customerPhone =
+            this.normalizeOptionalString(creditCardHolderInfo?.phone) ??
+            this.normalizeOptionalString((loggedUser as any)?.phone) ??
+            undefined;
+
         const asaasCustomer = await asaasGetOrCreateCustomerByCpfCnpj({
-            name: data.creditCardHolderInfo?.name ?? loggedUser.name,
+            name: customerName,
             cpfCnpj: cpf,
-            email: data.creditCardHolderInfo?.email ?? loggedUser.email,
-            phone:
-                data.creditCardHolderInfo?.phone ??
-                loggedUser.phone ??
-                undefined,
+            email: customerEmail,
+            phone: customerPhone,
             notificationDisabled: true,
         });
 
-        await asaasGetOrCreateRandomPixKey();
+        if (billingType === ASAASPaymentBillingTypeEnum.PIX) {
+            await asaasGetOrCreateRandomPixKey();
+        }
 
         const asaasPayment = await asaasCreatePayment({
             billingType,
@@ -292,8 +354,8 @@ export class PaymentService {
                     value: coupon.discountValue,
                     type: coupon.discountType,
                 },
-            creditCard: data.creditCard,
-            creditCardHolderInfo: data.creditCardHolderInfo,
+            creditCard: creditCard,
+            creditCardHolderInfo: creditCardHolderInfo,
         });
 
         let pixQrCode: string | null = null;
@@ -377,8 +439,29 @@ export class PaymentService {
             throw new AppError("Usuário não encontrado", 404);
         }
 
-        const cpf =
-            data.creditCardHolderInfo?.cpfCnpj ?? data.cpf ?? loggedUser.cpf;
+        const paymentType = this.resolvePaymentType(data.type);
+
+        const creditCard =
+            paymentType === "creditCard" ? data.creditCard : undefined;
+
+        const creditCardHolderInfo =
+            paymentType === "creditCard" ? data.creditCardHolderInfo : undefined;
+
+        if (paymentType === "creditCard" && !creditCard) {
+            throw new AppError("Faltam informações cartão", 400);
+        }
+
+        if (paymentType === "creditCard" && !creditCardHolderInfo) {
+            throw new AppError("Faltam informações do titular do cartão", 400);
+        }
+
+        const cpfFromHolder = this.normalizeOptionalString(
+            creditCardHolderInfo?.cpfCnpj,
+        );
+        const cpfFromPayload = this.normalizeOptionalString(data.cpf);
+        const cpfFromUser = this.normalizeOptionalString((loggedUser as any)?.cpf);
+
+        const cpf = cpfFromHolder ?? cpfFromPayload ?? cpfFromUser;
         if (!cpf) {
             throw new AppError(
                 "O CPF do usuário é obrigatório para efetuar a compra",
@@ -414,7 +497,10 @@ export class PaymentService {
             );
         }
 
-        const coupon = await this.validateCoupon(data.coupon, plan.id);
+        const coupon = await this.validateCoupon(
+            this.normalizeOptionalString(data.coupon),
+            plan.id,
+        );
 
         const hasSubscription = await this.carHasSubscription(car.licensePlate);
         if (hasSubscription) {
@@ -424,29 +510,15 @@ export class PaymentService {
             );
         }
 
-        const billingPaymentTypes = new Map<
-            CreatePaymentDTO["type"],
-            ASAASPaymentBillingTypeEnum
-        >([
-            ["pix", ASAASPaymentBillingTypeEnum.PIX],
-            ["creditCard", ASAASPaymentBillingTypeEnum.CREDIT_CARD],
-        ]);
-        const billingPaymentType = billingPaymentTypes.get(data.type);
-        if (!billingPaymentType) {
-            throw new AppError("Tipo de pagamento inválido", 400);
-        }
+        const billingPaymentType =
+            paymentType === "pix"
+                ? ASAASPaymentBillingTypeEnum.PIX
+                : ASAASPaymentBillingTypeEnum.CREDIT_CARD;
 
-        const billingSubscriptionTypes = new Map<
-            CreatePaymentDTO["type"],
-            ASAASSubscriptionBillingTypeEnum
-        >([
-            ["pix", ASAASSubscriptionBillingTypeEnum.PIX],
-            ["creditCard", ASAASSubscriptionBillingTypeEnum.CREDIT_CARD],
-        ]);
-        const billingSubscriptionType = billingSubscriptionTypes.get(data.type);
-        if (!billingSubscriptionType) {
-            throw new AppError("Tipo de pagamento inválido", 400);
-        }
+        const billingSubscriptionType =
+            paymentType === "pix"
+                ? ASAASSubscriptionBillingTypeEnum.PIX
+                : ASAASSubscriptionBillingTypeEnum.CREDIT_CARD;
 
         if (
             billingPaymentType === ASAASPaymentBillingTypeEnum.PIX ||
@@ -456,16 +528,45 @@ export class PaymentService {
         }
 
         console.log("[subscribeToPlan] Criando cliente no ASAAS...");
+
+        const customerEmail =
+            this.normalizeOptionalString(creditCardHolderInfo?.email) ??
+            this.normalizeOptionalString((loggedUser as any)?.email);
+
+        const customerPhone =
+            this.normalizeOptionalString(creditCardHolderInfo?.phone) ??
+            this.normalizeOptionalString((loggedUser as any)?.phone) ??
+            undefined;
+
+        const customerName =
+            this.normalizeOptionalString((loggedUser as any)?.name) ??
+            this.normalizeOptionalString(creditCardHolderInfo?.name);
+
+        if (!customerName) {
+            throw new AppError(
+                "O nome do usuário é obrigatório para efetuar a compra",
+                400,
+            );
+        }
+
+        if (!customerEmail) {
+            throw new AppError(
+                "O e-mail do usuário é obrigatório para efetuar a compra",
+                400,
+            );
+        }
+
         const asaasCustomer = await asaasGetOrCreateCustomerByCpfCnpj({
-            name: loggedUser.name,
-            cpfCnpj: data.creditCardHolderInfo?.cpfCnpj ?? cpf,
-            email: data.creditCardHolderInfo?.email ?? loggedUser.email,
-            phone: data.creditCardHolderInfo?.phone ?? loggedUser.phone,
-            postalCode: data.creditCardHolderInfo?.postalCode,
-            addressNumber: data.creditCardHolderInfo?.addressNumber,
+            name: customerName,
+            cpfCnpj: creditCardHolderInfo?.cpfCnpj ?? cpf,
+            email: customerEmail,
+            phone: customerPhone,
+            postalCode: creditCardHolderInfo?.postalCode,
+            addressNumber: creditCardHolderInfo?.addressNumber,
             mobilePhone:
-                data.creditCardHolderInfo?.mobilePhone ??
-                data.creditCardHolderInfo?.phone,
+                creditCardHolderInfo?.mobilePhone ??
+                creditCardHolderInfo?.phone ??
+                customerPhone,
             notificationDisabled: false,
         });
 
@@ -586,8 +687,8 @@ export class PaymentService {
                         value: coupon.discountValue,
                         type: coupon.discountType,
                     },
-                creditCard: data.creditCard,
-                creditCardHolderInfo: data.creditCardHolderInfo,
+                creditCard: creditCard,
+                creditCardHolderInfo: creditCardHolderInfo,
             });
 
             subscription.installmentIdAsaas = asaasPayment.installment
@@ -1212,6 +1313,24 @@ export class PaymentService {
                 );
             }
 
+            const paymentType = this.resolvePaymentType(data.type);
+
+            const creditCard =
+                paymentType === "creditCard" ? data.creditCard : undefined;
+
+            const creditCardHolderInfo =
+                paymentType === "creditCard" ? data.creditCardHolderInfo : undefined;
+
+            if (billingType === ASAASSubscriptionBillingTypeEnum.CREDIT_CARD) {
+                if (!creditCard) {
+                    throw new AppError("Faltam informações cartão", 400);
+                }
+
+                if (!creditCardHolderInfo) {
+                    throw new AppError("Faltam informações do titular do cartão", 400);
+                }
+            }
+
             const timeZoneOffset = data.timeZoneOffset ?? -180;
             const startDate = new Date();
             startDate.setMinutes(startDate.getMinutes() + timeZoneOffset);
@@ -1251,8 +1370,8 @@ export class PaymentService {
                     couponId: coupon?.id,
                     subId: localSubscription.id,
                 }),
-                creditCard: data.creditCard,
-                creditCardHolderInfo: data.creditCardHolderInfo,
+                creditCard: creditCard,
+                creditCardHolderInfo: creditCardHolderInfo,
                 discount: !coupon
                     ? undefined
                     : {
