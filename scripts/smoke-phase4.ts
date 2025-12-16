@@ -1,10 +1,47 @@
 /* eslint-disable no-console */
 import "dotenv/config";
-import { PrismaClient, PaymentStatus } from "@prisma/client";
 import crypto from "crypto";
+import {
+    Prisma,
+    PrismaClient,
+    PaymentStatus,
+    Role,
+    UserStatus,
+    WalletType,
+    TransactionType,
+    TransactionSource,
+    BonusType,
+    PaymentChannel,
+    DiscountType,
+} from "@prisma/client";
 
-const prisma = new PrismaClient();
+// ----------------------------
+// CLI args
+// ----------------------------
+function getArgValue(name: string): string | undefined {
+    const prefix = `--${name}=`;
+    const found = process.argv.find((a) => a.startsWith(prefix));
+    if (!found) return undefined;
+    return found.slice(prefix.length).trim() || undefined;
+}
 
+const dbUrlArg = getArgValue("db-url");
+const dbUrl = dbUrlArg ?? process.env.DATABASE_URL;
+
+if (!dbUrl) {
+    console.error("ERROR: DATABASE_URL ausente. Use --db-url=... ou export DATABASE_URL.");
+    process.exit(1);
+}
+
+const prisma = new PrismaClient({
+    datasources: {
+        db: { url: dbUrl },
+    },
+});
+
+// ----------------------------
+// Helpers (log/assert/time/id)
+// ----------------------------
 function log(step: string, msg: string, data?: any) {
     console.log(`[${new Date().toISOString()}] [${step}]`, msg, data ?? "");
 }
@@ -13,505 +50,685 @@ function assert(cond: any, msg: string): asserts cond {
     if (!cond) throw new Error(msg);
 }
 
-function pad2(n: number) {
+function pad2(n: number): string {
     return String(n).padStart(2, "0");
 }
 
-function toYearMonth(d: Date) {
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+function competenceYearMonthFrom(date: Date): string {
+    const y = date.getFullYear();
+    const m = date.getMonth() + 1;
+    return `${y}-${pad2(m)}`;
 }
 
-async function safeCreateCashbackWallet(userId: number) {
-    const existing = await prisma.cashbackWallet.findFirst({
-        where: { userId },
-    });
-
-    if (existing) return existing;
-
-    return prisma.cashbackWallet.create({
-        data: {
-            userId,
-            type: "INTERNAL",
-            balance: 0,
-        },
-    });
+function randomCpf11(): string {
+    // 11 dígitos
+    return crypto.randomInt(10_000_000_000, 99_999_999_999).toString();
 }
 
-/**
- * Simula o crédito de cashback no estilo do seu Phase 3:
- * - valida idempotência via cashbackTransaction.eventKey
- * - cria transaction
- * - incrementa wallet
- */
-async function creditCashbackOrThrow(params: {
+function randomEmail(prefix: string): string {
+    return `${prefix}.${Date.now()}.${crypto.randomInt(1000, 9999)}@test.com`;
+}
+
+function knownRequestErrorCode(e: unknown): string | undefined {
+    if (e instanceof Prisma.PrismaClientKnownRequestError) return e.code;
+    return undefined;
+}
+
+function isUniqueConstraintError(e: unknown): boolean {
+    return knownRequestErrorCode(e) === "P2002";
+}
+
+async function ensureWallet(userId: number) {
+    // Wallet tem @@unique([userId, type])
+    const wallet = await prisma.cashbackWallet.upsert({
+        where: { userId_type: { userId, type: WalletType.INTERNAL } },
+        create: { userId, type: WalletType.INTERNAL, balance: 0 },
+        update: {},
+    });
+    return wallet;
+}
+
+async function creditCashbackIdempotent(params: {
     receiverId: number;
-    amount: number;
     eventKey: string;
-    meta: Record<string, any>;
-    relatedId: string;
+    amount: number;
+    meta?: any;
+    relatedId?: string;
 }) {
-    const { receiverId, amount, eventKey, meta, relatedId } = params;
+    const { receiverId, eventKey, amount, meta, relatedId } = params;
 
-    const wallet = await safeCreateCashbackWallet(receiverId);
-
-    const existsTx = await prisma.cashbackTransaction.findUnique({
+    const exists = await prisma.cashbackTransaction.findUnique({
         where: { eventKey },
     });
 
-    assert(!existsTx, `Idempotência falhou: já existe cashbackTransaction para eventKey=${eventKey}`);
+    if (exists) {
+        throw new Error(`Idempotência falhou: já existe cashbackTransaction para eventKey=${eventKey}`);
+    }
 
-    const tx = await prisma.cashbackTransaction.create({
+    await prisma.cashbackTransaction.create({
         data: {
             userId: receiverId,
-            type: "EARNED",
-            source: "INDICATION",
+            type: TransactionType.EARNED,
+            source: TransactionSource.INDICATION,
             amount,
-            relatedId,
+            relatedId: relatedId ?? null,
             eventKey,
-            meta,
+            meta: meta ?? {},
         },
     });
 
     await prisma.cashbackWallet.update({
-        where: { id: wallet.id },
-        data: {
-            balance: { increment: amount },
-        },
+        where: { userId_type: { userId: receiverId, type: WalletType.INTERNAL } },
+        data: { balance: { increment: amount } },
     });
+}
 
-    return { walletId: wallet.id, tx };
+// ----------------------------
+// Business helpers (Fase 2)
+// ----------------------------
+const MINIMUM_CHARGE_AMOUNT = 1;
+
+type CouponLike = {
+    discountType: DiscountType;
+    discountValue: number;
+};
+
+function ensureMinimumAmount(value: number, minimum = MINIMUM_CHARGE_AMOUNT): number {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return minimum;
+    if (n <= 0) return minimum;
+    return Number(n.toFixed(2));
 }
 
 /**
- * Cria ReferralBonus se não existir pelo eventKey.
- * Retorna o bonus criado ou o existente (dependendo do seu objetivo).
- * Para o smoke test, a gente vai preferir "criar e assert não existia".
+ * Regra Fase 2: cupom nunca pode zerar cobrança.
+ * - aplica desconto com cap: final >= minimumCharge
+ * - retorna finalAmount
  */
-async function createReferralBonusOrThrow(params: {
-    eventKey: string;
-    receiverId: number;
-    payerId: number;
-    level: number;
-    type: "UNIQUE" | "RECURRENT";
-    amount: number;
-    paymentId: number;
-    competenceYearMonth: string;
-}) {
-    const {
-        eventKey,
-        receiverId,
-        payerId,
-        level,
-        type,
-        amount,
-        paymentId,
-        competenceYearMonth,
-    } = params;
+function applyCouponWithMinimumCharge(
+    baseAmount: number,
+    coupon: CouponLike | null,
+    minimumCharge: number = MINIMUM_CHARGE_AMOUNT,
+): { finalAmount: number; appliedDiscount: number } {
+    if (!coupon) return { finalAmount: ensureMinimumAmount(baseAmount, minimumCharge), appliedDiscount: 0 };
 
-    const existsBonus = await prisma.referralBonus.findUnique({
-        where: { eventKey },
-    });
+    const base = Number(baseAmount) || 0;
+    const minCharge = ensureMinimumAmount(minimumCharge, MINIMUM_CHARGE_AMOUNT);
 
-    assert(!existsBonus, `Idempotência falhou: já existe referralBonus para eventKey=${eventKey}`);
+    if (base <= 0) return { finalAmount: minCharge, appliedDiscount: 0 };
 
-    const bonus = await prisma.referralBonus.create({
-        data: {
-            receiverId,
-            payerId,
-            level,
-            type,
-            amount,
-            paymentStatus: "PAID",
-            eventKey,
-            paymentId,
-            competenceYearMonth,
-        },
-    });
+    const maxDiscount = Math.max(0, base - minCharge);
+    if (maxDiscount <= 0) return { finalAmount: minCharge, appliedDiscount: 0 };
 
-    return bonus;
+    if (coupon.discountType === DiscountType.PERCENTAGE) {
+        const percent = Number(coupon.discountValue) || 0;
+        const requestedDiscount = (base * percent) / 100;
+        const applied = Math.min(requestedDiscount, maxDiscount);
+        const final = base - applied;
+        return { finalAmount: ensureMinimumAmount(final, minCharge), appliedDiscount: Number(applied.toFixed(2)) };
+    }
+
+    // FIXED
+    const requested = Number(coupon.discountValue) || 0;
+    const applied = Math.min(requested, maxDiscount);
+    const final = base - applied;
+    return { finalAmount: ensureMinimumAmount(final, minCharge), appliedDiscount: Number(applied.toFixed(2)) };
 }
 
+// ----------------------------
+// MAIN
+// ----------------------------
 async function main() {
-    log("INIT", "=== Smoke Test Fase 4: MLM (UNIQUE + RECURRENT) + Cashback + Idempotência ===");
+    log("INIT", "=== Smoke Test Fase 1–4: Schema + Cupom(min) + Cashback + MLM + Idempotência ===");
 
-    // ------------------------------------------------------------------
-    // 0) Setup: criar cadeia MLM (níveis 1,2,3) + payer
-    // ------------------------------------------------------------------
-    // Aqui não dependemos de campos de referral no User (ex.: referredById),
-    // porque o teste valida o output (ReferralBonus + Cashback) e idempotência.
-    // Se você tiver campos de relacionamento, você pode complementar depois.
-    // ------------------------------------------------------------------
+    const now = new Date();
+    const competenceYM = competenceYearMonthFrom(now);
 
-    const lvl3 = await prisma.user.create({
+    // =========================================================
+    // FASE 1: Criação de User respeitando schema (role obrigatório)
+    // =========================================================
+    log("PHASE1", "Criando usuário base (schema ok: role obrigatório) ...");
+
+    const userPhase1 = await prisma.user.create({
         data: {
-            name: "Upline L3 Phase4",
-            email: `upline.l3.${Date.now()}@test.com`,
+            name: "User Phase1",
+            email: randomEmail("phase1"),
             password: "123456",
-            phone: "11333333333",
-            cpf: crypto.randomInt(1e10, 9e10).toString(),
-            role: "USER",
-            status: "ACTIVE",
+            phone: "11999990000",
+            cpf: randomCpf11(),
+            role: Role.USER,
+            status: UserStatus.ACTIVE,
         },
     });
 
-    const lvl2 = await prisma.user.create({
+    log("PHASE1", "User criado", { id: userPhase1.id, role: userPhase1.role, status: userPhase1.status });
+
+    // =========================================================
+    // FASE 2: Cupom nunca zera cobrança (mínimo a pagar) + Plan/Coupon/Payment coerentes
+    // =========================================================
+    log("PHASE2", "Criando Plan + Coupons e validando regra de mínimo a pagar ...");
+
+    const plan = await prisma.plan.create({
         data: {
-            name: "Upline L2 Phase4",
-            email: `upline.l2.${Date.now()}@test.com`,
-            password: "123456",
-            phone: "11222222222",
-            cpf: crypto.randomInt(1e10, 9e10).toString(),
-            role: "USER",
-            status: "ACTIVE",
+            name: `Plan Phase2 ${Date.now()}-${crypto.randomInt(1000, 9999)}`,
+            price: 100,
+            duration: 30,
+            description: "Plano criado para smoke test Fase 2",
+            periodicityType: "MONTH",
+            isPackage: true,
+            isBestChoice: false,
+            maxInstallments: 0,
         },
     });
 
-    const lvl1 = await prisma.user.create({
+    const validFrom = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const validUntil = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+    const coupon100Percent = await prisma.coupon.create({
         data: {
-            name: "Upline L1 Phase4",
-            email: `upline.l1.${Date.now()}@test.com`,
+            code: `CUPOM100P-${Date.now()}-${crypto.randomInt(1000, 9999)}`,
+            description: "Cupom 100% (deve ser capado para mínimo a pagar)",
+            additionalInfo: "Smoke test Fase 2",
+            discountType: DiscountType.PERCENTAGE,
+            discountValue: 100,
+            maxDiscountValue: null,
+            validFrom,
+            validUntil,
+            isActive: true,
+            usageLimit: null,
+            currentUsage: 0,
+            plans: {
+                connect: [{ id: plan.id }],
+            },
+        },
+    });
+
+    const couponFixedHigh = await prisma.coupon.create({
+        data: {
+            code: `CUPOMFIX-${Date.now()}-${crypto.randomInt(1000, 9999)}`,
+            description: "Cupom FIXED alto (deve ser capado para mínimo a pagar)",
+            additionalInfo: "Smoke test Fase 2",
+            discountType: DiscountType.FIXED,
+            discountValue: 999999,
+            maxDiscountValue: null,
+            validFrom,
+            validUntil,
+            isActive: true,
+            usageLimit: null,
+            currentUsage: 0,
+            plans: {
+                connect: [{ id: plan.id }],
+            },
+        },
+    });
+
+    const pricingPercent = applyCouponWithMinimumCharge(plan.price, {
+        discountType: coupon100Percent.discountType,
+        discountValue: coupon100Percent.discountValue,
+    });
+
+    const pricingFixed = applyCouponWithMinimumCharge(plan.price, {
+        discountType: couponFixedHigh.discountType,
+        discountValue: couponFixedHigh.discountValue,
+    });
+
+    log("PHASE2", "Pricing com cupom 100% e FIXED alto", {
+        base: plan.price,
+        percent100: pricingPercent,
+        fixedHigh: pricingFixed,
+        minimumCharge: MINIMUM_CHARGE_AMOUNT,
+    });
+
+    assert(pricingPercent.finalAmount >= MINIMUM_CHARGE_AMOUNT, "Fase 2 falhou: cupom % zerou cobrança");
+    assert(pricingFixed.finalAmount >= MINIMUM_CHARGE_AMOUNT, "Fase 2 falhou: cupom FIXED zerou cobrança");
+
+    // Cria Payment coerente (simulando valor final já capado)
+    const paymentPhase2 = await prisma.payment.create({
+        data: {
+            userId: userPhase1.id,
+            planId: plan.id,
+            couponId: coupon100Percent.id,
+            amount: ensureMinimumAmount(pricingPercent.finalAmount, MINIMUM_CHARGE_AMOUNT),
+            status: PaymentStatus.PAID,
+            paidAt: now,
+            paymentIdAsaas: `pay_${crypto.randomUUID()}`,
+            channel: PaymentChannel.PIX,
+        },
+    });
+
+    log("PHASE2", "Payment criado com amount >= mínimo", {
+        paymentId: paymentPhase2.id,
+        amount: paymentPhase2.amount,
+        planId: paymentPhase2.planId,
+        couponId: paymentPhase2.couponId,
+    });
+
+    assert(paymentPhase2.amount >= MINIMUM_CHARGE_AMOUNT, "Fase 2 falhou: payment.amount ficou < mínimo");
+
+    // =========================================================
+    // FASE 3: Cashback por ReferralBonus (1 nível) + idempotência de tx
+    // =========================================================
+    log("PHASE3", "Criando payer/receiver e testando cashback por ReferralBonus (1 nível) ...");
+
+    const payerP3 = await prisma.user.create({
+        data: {
+            name: "Payer Phase3",
+            email: randomEmail("payer.phase3"),
             password: "123456",
-            phone: "11111111111",
-            cpf: crypto.randomInt(1e10, 9e10).toString(),
-            role: "USER",
-            status: "ACTIVE",
+            phone: "11911111111",
+            cpf: randomCpf11(),
+            role: Role.USER,
+            status: UserStatus.ACTIVE,
+        },
+    });
+
+    const receiverP3 = await prisma.user.create({
+        data: {
+            name: "Receiver Phase3",
+            email: randomEmail("receiver.phase3"),
+            password: "123456",
+            phone: "11922222222",
+            cpf: randomCpf11(),
+            role: Role.USER,
+            status: UserStatus.ACTIVE,
+        },
+    });
+
+    await ensureWallet(receiverP3.id);
+
+    const paymentP3 = await prisma.payment.create({
+        data: {
+            userId: payerP3.id,
+            amount: 100,
+            status: PaymentStatus.PAID,
+            paidAt: now,
+            paymentIdAsaas: `pay_${crypto.randomUUID()}`,
+            channel: PaymentChannel.PIX,
+        },
+    });
+
+    const eventKeyP3 = `TEST:PHASE3:${paymentP3.id}:${receiverP3.id}`;
+
+    const bonusP3 = await prisma.referralBonus.create({
+        data: {
+            receiverId: receiverP3.id,
+            payerId: payerP3.id,
+            level: 1,
+            type: BonusType.RECURRENT,
+            amount: 15,
+            paymentStatus: "PAID",
+            eventKey: eventKeyP3,
+            paymentId: paymentP3.id,
+            competenceYearMonth: competenceYM,
+        },
+    });
+
+    await creditCashbackIdempotent({
+        receiverId: receiverP3.id,
+        eventKey: eventKeyP3,
+        amount: bonusP3.amount,
+        relatedId: String(bonusP3.id),
+        meta: { payerId: payerP3.id, level: 1, bonusType: bonusP3.type },
+    });
+
+    const walletP3 = await prisma.cashbackWallet.findUnique({
+        where: { userId_type: { userId: receiverP3.id, type: WalletType.INTERNAL } },
+    });
+
+    const txsP3 = await prisma.cashbackTransaction.findMany({
+        where: { userId: receiverP3.id },
+    });
+
+    log("PHASE3", "Saldo e txs", { wallet: walletP3, txCount: txsP3.length });
+
+    assert(walletP3?.balance === 15, "Fase 3 falhou: saldo cashback incorreto (esperado 15)");
+    assert(txsP3.length === 1, "Fase 3 falhou: quantidade de transações incorreta (esperado 1)");
+
+    // Idempotência TX (deve bloquear)
+    try {
+        await creditCashbackIdempotent({
+            receiverId: receiverP3.id,
+            eventKey: eventKeyP3,
+            amount: bonusP3.amount,
+            relatedId: String(bonusP3.id),
+            meta: { duplicate: true },
+        });
+        throw new Error("Fase 3 falhou: era para bloquear cashbackTransaction duplicada");
+    } catch (e) {
+        log("PHASE3_IDEMPOTENCY_TX", "OK: bloqueou duplicidade de cashbackTransaction", {
+            error: (e as Error)?.message ?? String(e),
+        });
+    }
+
+    // =========================================================
+    // FASE 4: MLM (3 níveis) + UNIQUE + RECURRENT + cashback + idempotência
+    // =========================================================
+    log("PHASE4", "Criando cadeia MLM (3 níveis) e testando UNIQUE + RECURRENT + cashback + idempotência ...");
+
+    // Users MLM
+    const receiverL3 = await prisma.user.create({
+        data: {
+            name: "Receiver L3 Phase4",
+            email: randomEmail("mlm.l3"),
+            password: "123456",
+            phone: "11800000003",
+            cpf: randomCpf11(),
+            role: Role.USER,
+            status: UserStatus.ACTIVE,
+        },
+    });
+
+    const receiverL2 = await prisma.user.create({
+        data: {
+            name: "Receiver L2 Phase4",
+            email: randomEmail("mlm.l2"),
+            password: "123456",
+            phone: "11800000002",
+            cpf: randomCpf11(),
+            role: Role.USER,
+            status: UserStatus.ACTIVE,
+            referrerId: receiverL3.id,
+        },
+    });
+
+    const receiverL1 = await prisma.user.create({
+        data: {
+            name: "Receiver L1 Phase4",
+            email: randomEmail("mlm.l1"),
+            password: "123456",
+            phone: "11800000001",
+            cpf: randomCpf11(),
+            role: Role.USER,
+            status: UserStatus.ACTIVE,
+            referrerId: receiverL2.id,
         },
     });
 
     const payer = await prisma.user.create({
         data: {
             name: "Payer Phase4",
-            email: `payer.phase4.${Date.now()}@test.com`,
+            email: randomEmail("mlm.payer"),
             password: "123456",
-            phone: "11999999999",
-            cpf: crypto.randomInt(1e10, 9e10).toString(),
-            role: "USER",
-            status: "ACTIVE",
+            phone: "11700000000",
+            cpf: randomCpf11(),
+            role: Role.USER,
+            status: UserStatus.ACTIVE,
+            referrerId: receiverL1.id,
         },
     });
 
-    log("USERS", "Cadeia MLM criada", {
+    // (Opcional) Registrar trilha em UserReferral (não é obrigatório para os bônus em si,
+    // mas ajuda a manter o dataset consistente com o domínio)
+    await prisma.userReferral.create({
+        data: {
+            referrerId: receiverL1.id,
+            referredId: payer.id,
+            source: "UNKNOWN",
+            meta: { smoke: "phase4" },
+        },
+    });
+    await prisma.userReferral.create({
+        data: {
+            referrerId: receiverL2.id,
+            referredId: receiverL1.id,
+            source: "UNKNOWN",
+            meta: { smoke: "phase4" },
+        },
+    });
+    await prisma.userReferral.create({
+        data: {
+            referrerId: receiverL3.id,
+            referredId: receiverL2.id,
+            source: "UNKNOWN",
+            meta: { smoke: "phase4" },
+        },
+    });
+
+    log("PHASE4", "Cadeia MLM criada", {
         payerId: payer.id,
-        level1ReceiverId: lvl1.id,
-        level2ReceiverId: lvl2.id,
-        level3ReceiverId: lvl3.id,
+        level1ReceiverId: receiverL1.id,
+        level2ReceiverId: receiverL2.id,
+        level3ReceiverId: receiverL3.id,
     });
 
-    // ------------------------------------------------------------------
-    // 1) Criar carteiras (wallet) para cada receiver
-    // ------------------------------------------------------------------
-    const w1 = await safeCreateCashbackWallet(lvl1.id);
-    const w2 = await safeCreateCashbackWallet(lvl2.id);
-    const w3 = await safeCreateCashbackWallet(lvl3.id);
+    const walletL1 = await ensureWallet(receiverL1.id);
+    const walletL2 = await ensureWallet(receiverL2.id);
+    const walletL3 = await ensureWallet(receiverL3.id);
 
-    log("WALLETS", "Carteiras criadas/garantidas", {
-        walletL1: w1,
-        walletL2: w2,
-        walletL3: w3,
-    });
+    log("PHASE4", "Carteiras criadas/garantidas", { walletL1, walletL2, walletL3 });
 
-    // ------------------------------------------------------------------
-    // 2) Criar pagamento de PLANO (PAID) - base para bônus
-    // ------------------------------------------------------------------
-    // Obs.: Mantemos o pagamento como "plano" conceitualmente.
-    // Se seu Payment tiver planId/subscriptionId, você pode incluir aqui.
-    // ------------------------------------------------------------------
-    const paidAt = new Date();
-
-    const payment = await prisma.payment.create({
+    // Payment base (pode ser plano ou não; aqui é “base para bônus”)
+    const paymentP4 = await prisma.payment.create({
         data: {
             userId: payer.id,
             amount: 100,
             status: PaymentStatus.PAID,
-            paidAt,
+            paidAt: now,
             paymentIdAsaas: `pay_${crypto.randomUUID()}`,
-            channel: "PIX",
+            channel: PaymentChannel.PIX,
         },
     });
 
-    log("PAYMENT", "Pagamento PAID criado (base para MLM)", payment);
+    log("PHASE4", "Pagamento PAID criado (base para MLM)", paymentP4);
 
-    const competenceYearMonth = toYearMonth(paidAt);
+    // Distribuição MLM (ajuste aqui se seus percentuais mudarem)
+    const MLM = {
+        L1: { level: 1, amount: 15 },
+        L2: { level: 2, amount: 10 },
+        L3: { level: 3, amount: 5 },
+    } as const;
 
-    // Simulamos um identificador de assinatura/contrato para UNIQUE
-    // (no PaymentService real isso é subscriptionId local).
-    const subscriptionKey = `SUB:${crypto.randomUUID()}`;
+    const subscriptionUuid = crypto.randomUUID();
 
-    // ------------------------------------------------------------------
-    // 3) Criar bônus UNIQUE (apenas no PRIMEIRO PAID da assinatura)
-    // ------------------------------------------------------------------
-    // Percentuais/valores de exemplo:
-    // - Level 1: 15
-    // - Level 2: 10
-    // - Level 3: 5
-    //
-    // Se seus percentuais reais forem diferentes, ajuste aqui.
-    // ------------------------------------------------------------------
-    const uniqueEventKeyBase = `TEST:PHASE4:UNIQUE:${subscriptionKey}:PAYMENT:${payment.id}`;
+    // UNIQUE (primeiro pagamento da assinatura)
+    const uniqueKeys = {
+        L1: `TEST:PHASE4:UNIQUE:SUB:${subscriptionUuid}:PAYMENT:${paymentP4.id}:L1:${receiverL1.id}`,
+        L2: `TEST:PHASE4:UNIQUE:SUB:${subscriptionUuid}:PAYMENT:${paymentP4.id}:L2:${receiverL2.id}`,
+        L3: `TEST:PHASE4:UNIQUE:SUB:${subscriptionUuid}:PAYMENT:${paymentP4.id}:L3:${receiverL3.id}`,
+    };
 
-    const bonusUniqueL1 = await createReferralBonusOrThrow({
-        eventKey: `${uniqueEventKeyBase}:L1:${lvl1.id}`,
-        receiverId: lvl1.id,
-        payerId: payer.id,
-        level: 1,
-        type: "UNIQUE",
-        amount: 15,
-        paymentId: payment.id,
-        competenceYearMonth,
+    const bonusUniqueL1 = await prisma.referralBonus.create({
+        data: {
+            receiverId: receiverL1.id,
+            payerId: payer.id,
+            level: MLM.L1.level,
+            type: BonusType.UNIQUE,
+            amount: MLM.L1.amount,
+            paymentStatus: "PAID",
+            eventKey: uniqueKeys.L1,
+            paymentId: paymentP4.id,
+            competenceYearMonth: competenceYM,
+        },
     });
 
-    const bonusUniqueL2 = await createReferralBonusOrThrow({
-        eventKey: `${uniqueEventKeyBase}:L2:${lvl2.id}`,
-        receiverId: lvl2.id,
-        payerId: payer.id,
-        level: 2,
-        type: "UNIQUE",
-        amount: 10,
-        paymentId: payment.id,
-        competenceYearMonth,
+    const bonusUniqueL2 = await prisma.referralBonus.create({
+        data: {
+            receiverId: receiverL2.id,
+            payerId: payer.id,
+            level: MLM.L2.level,
+            type: BonusType.UNIQUE,
+            amount: MLM.L2.amount,
+            paymentStatus: "PAID",
+            eventKey: uniqueKeys.L2,
+            paymentId: paymentP4.id,
+            competenceYearMonth: competenceYM,
+        },
     });
 
-    const bonusUniqueL3 = await createReferralBonusOrThrow({
-        eventKey: `${uniqueEventKeyBase}:L3:${lvl3.id}`,
-        receiverId: lvl3.id,
-        payerId: payer.id,
-        level: 3,
-        type: "UNIQUE",
-        amount: 5,
-        paymentId: payment.id,
-        competenceYearMonth,
+    const bonusUniqueL3 = await prisma.referralBonus.create({
+        data: {
+            receiverId: receiverL3.id,
+            payerId: payer.id,
+            level: MLM.L3.level,
+            type: BonusType.UNIQUE,
+            amount: MLM.L3.amount,
+            paymentStatus: "PAID",
+            eventKey: uniqueKeys.L3,
+            paymentId: paymentP4.id,
+            competenceYearMonth: competenceYM,
+        },
     });
 
-    log("BONUS_UNIQUE", "Bônus UNIQUE criados", {
-        bonusUniqueL1,
-        bonusUniqueL2,
-        bonusUniqueL3,
+    log("PHASE4_UNIQUE", "Bônus UNIQUE criados", { bonusUniqueL1, bonusUniqueL2, bonusUniqueL3 });
+
+    // RECURRENT (por competência)
+    const recurrentKeys = {
+        L1: `TEST:PHASE4:RECURRENT:${competenceYM}:PAYMENT:${paymentP4.id}:L1:${receiverL1.id}`,
+        L2: `TEST:PHASE4:RECURRENT:${competenceYM}:PAYMENT:${paymentP4.id}:L2:${receiverL2.id}`,
+        L3: `TEST:PHASE4:RECURRENT:${competenceYM}:PAYMENT:${paymentP4.id}:L3:${receiverL3.id}`,
+    };
+
+    const bonusRecurrentL1 = await prisma.referralBonus.create({
+        data: {
+            receiverId: receiverL1.id,
+            payerId: payer.id,
+            level: MLM.L1.level,
+            type: BonusType.RECURRENT,
+            amount: MLM.L1.amount,
+            paymentStatus: "PAID",
+            eventKey: recurrentKeys.L1,
+            paymentId: paymentP4.id,
+            competenceYearMonth: competenceYM,
+        },
     });
 
-    // ------------------------------------------------------------------
-    // 4) Criar bônus RECURRENT (por competência YYYY-MM)
-    // ------------------------------------------------------------------
-    const recurrentEventKeyBase = `TEST:PHASE4:RECURRENT:${competenceYearMonth}:PAYMENT:${payment.id}`;
-
-    const bonusRecurrentL1 = await createReferralBonusOrThrow({
-        eventKey: `${recurrentEventKeyBase}:L1:${lvl1.id}`,
-        receiverId: lvl1.id,
-        payerId: payer.id,
-        level: 1,
-        type: "RECURRENT",
-        amount: 15,
-        paymentId: payment.id,
-        competenceYearMonth,
+    const bonusRecurrentL2 = await prisma.referralBonus.create({
+        data: {
+            receiverId: receiverL2.id,
+            payerId: payer.id,
+            level: MLM.L2.level,
+            type: BonusType.RECURRENT,
+            amount: MLM.L2.amount,
+            paymentStatus: "PAID",
+            eventKey: recurrentKeys.L2,
+            paymentId: paymentP4.id,
+            competenceYearMonth: competenceYM,
+        },
     });
 
-    const bonusRecurrentL2 = await createReferralBonusOrThrow({
-        eventKey: `${recurrentEventKeyBase}:L2:${lvl2.id}`,
-        receiverId: lvl2.id,
-        payerId: payer.id,
-        level: 2,
-        type: "RECURRENT",
-        amount: 10,
-        paymentId: payment.id,
-        competenceYearMonth,
+    const bonusRecurrentL3 = await prisma.referralBonus.create({
+        data: {
+            receiverId: receiverL3.id,
+            payerId: payer.id,
+            level: MLM.L3.level,
+            type: BonusType.RECURRENT,
+            amount: MLM.L3.amount,
+            paymentStatus: "PAID",
+            eventKey: recurrentKeys.L3,
+            paymentId: paymentP4.id,
+            competenceYearMonth: competenceYM,
+        },
     });
 
-    const bonusRecurrentL3 = await createReferralBonusOrThrow({
-        eventKey: `${recurrentEventKeyBase}:L3:${lvl3.id}`,
-        receiverId: lvl3.id,
-        payerId: payer.id,
-        level: 3,
-        type: "RECURRENT",
-        amount: 5,
-        paymentId: payment.id,
-        competenceYearMonth,
-    });
-
-    log("BONUS_RECURRENT", "Bônus RECURRENT criados", {
+    log("PHASE4_RECURRENT", "Bônus RECURRENT criados", {
         bonusRecurrentL1,
         bonusRecurrentL2,
         bonusRecurrentL3,
     });
 
-    // ------------------------------------------------------------------
-    // 5) Creditar cashback (UNIQUE e RECURRENT) em cada receiver (6 créditos)
-    // ------------------------------------------------------------------
-    // A regra aqui é a mesma do Phase 3: cashbackTransaction UNIQUE por eventKey.
-    // ------------------------------------------------------------------
+    // Creditar cashback para UNIQUE + RECURRENT (níveis 1..3)
+    const allBonuses = [
+        bonusUniqueL1,
+        bonusUniqueL2,
+        bonusUniqueL3,
+        bonusRecurrentL1,
+        bonusRecurrentL2,
+        bonusRecurrentL3,
+    ];
 
-    // UNIQUE
-    await creditCashbackOrThrow({
-        receiverId: lvl1.id,
-        amount: bonusUniqueL1.amount,
-        eventKey: bonusUniqueL1.eventKey,
-        relatedId: String(bonusUniqueL1.id),
-        meta: {
-            payerId: payer.id,
-            level: bonusUniqueL1.level,
-            bonusType: bonusUniqueL1.type,
-            subscriptionKey,
-        },
-    });
-
-    await creditCashbackOrThrow({
-        receiverId: lvl2.id,
-        amount: bonusUniqueL2.amount,
-        eventKey: bonusUniqueL2.eventKey,
-        relatedId: String(bonusUniqueL2.id),
-        meta: {
-            payerId: payer.id,
-            level: bonusUniqueL2.level,
-            bonusType: bonusUniqueL2.type,
-            subscriptionKey,
-        },
-    });
-
-    await creditCashbackOrThrow({
-        receiverId: lvl3.id,
-        amount: bonusUniqueL3.amount,
-        eventKey: bonusUniqueL3.eventKey,
-        relatedId: String(bonusUniqueL3.id),
-        meta: {
-            payerId: payer.id,
-            level: bonusUniqueL3.level,
-            bonusType: bonusUniqueL3.type,
-            subscriptionKey,
-        },
-    });
-
-    // RECURRENT
-    await creditCashbackOrThrow({
-        receiverId: lvl1.id,
-        amount: bonusRecurrentL1.amount,
-        eventKey: bonusRecurrentL1.eventKey,
-        relatedId: String(bonusRecurrentL1.id),
-        meta: {
-            payerId: payer.id,
-            level: bonusRecurrentL1.level,
-            bonusType: bonusRecurrentL1.type,
-            competenceYearMonth,
-        },
-    });
-
-    await creditCashbackOrThrow({
-        receiverId: lvl2.id,
-        amount: bonusRecurrentL2.amount,
-        eventKey: bonusRecurrentL2.eventKey,
-        relatedId: String(bonusRecurrentL2.id),
-        meta: {
-            payerId: payer.id,
-            level: bonusRecurrentL2.level,
-            bonusType: bonusRecurrentL2.type,
-            competenceYearMonth,
-        },
-    });
-
-    await creditCashbackOrThrow({
-        receiverId: lvl3.id,
-        amount: bonusRecurrentL3.amount,
-        eventKey: bonusRecurrentL3.eventKey,
-        relatedId: String(bonusRecurrentL3.id),
-        meta: {
-            payerId: payer.id,
-            level: bonusRecurrentL3.level,
-            bonusType: bonusRecurrentL3.type,
-            competenceYearMonth,
-        },
-    });
-
-    log("CASHBACK", "Cashback creditado para UNIQUE + RECURRENT em níveis 1..3");
-
-    // ------------------------------------------------------------------
-    // 6) ASSERTS: saldo final e quantidade de transações
-    // ------------------------------------------------------------------
-    const finalW1 = await prisma.cashbackWallet.findUnique({ where: { id: w1.id } });
-    const finalW2 = await prisma.cashbackWallet.findUnique({ where: { id: w2.id } });
-    const finalW3 = await prisma.cashbackWallet.findUnique({ where: { id: w3.id } });
-
-    const txsL1 = await prisma.cashbackTransaction.findMany({
-        where: { userId: lvl1.id },
-    });
-    const txsL2 = await prisma.cashbackTransaction.findMany({
-        where: { userId: lvl2.id },
-    });
-    const txsL3 = await prisma.cashbackTransaction.findMany({
-        where: { userId: lvl3.id },
-    });
-
-    // cada receiver recebe 2 créditos: UNIQUE + RECURRENT
-    assert(txsL1.length === 2, "L1 deve ter exatamente 2 transações (UNIQUE + RECURRENT)");
-    assert(txsL2.length === 2, "L2 deve ter exatamente 2 transações (UNIQUE + RECURRENT)");
-    assert(txsL3.length === 2, "L3 deve ter exatamente 2 transações (UNIQUE + RECURRENT)");
-
-    // saldo esperado (UNIQUE + RECURRENT) = (15+15)=30, (10+10)=20, (5+5)=10
-    assert(finalW1?.balance === 30, `Saldo L1 incorreto: esperado 30, obtido ${finalW1?.balance}`);
-    assert(finalW2?.balance === 20, `Saldo L2 incorreto: esperado 20, obtido ${finalW2?.balance}`);
-    assert(finalW3?.balance === 10, `Saldo L3 incorreto: esperado 10, obtido ${finalW3?.balance}`);
-
-    log("ASSERT", "Saldos finais OK", {
-        L1: finalW1,
-        L2: finalW2,
-        L3: finalW3,
-    });
-
-    // ------------------------------------------------------------------
-    // 7) ASSERTS DE IDEMPOTÊNCIA
-    // ------------------------------------------------------------------
-    // 7.1) cashbackTransaction idempotente por eventKey
-    // Tentamos creditar novamente um dos bônus (deve falhar).
-    // ------------------------------------------------------------------
-    let idempotencyTxOk = false;
-    try {
-        await creditCashbackOrThrow({
-            receiverId: lvl1.id,
-            amount: bonusUniqueL1.amount,
-            eventKey: bonusUniqueL1.eventKey,
-            relatedId: String(bonusUniqueL1.id),
+    for (const b of allBonuses) {
+        await creditCashbackIdempotent({
+            receiverId: b.receiverId,
+            eventKey: b.eventKey,
+            amount: b.amount,
+            relatedId: String(b.id),
             meta: {
-                payerId: payer.id,
-                level: bonusUniqueL1.level,
-                bonusType: bonusUniqueL1.type,
-                subscriptionKey,
+                payerId: b.payerId,
+                level: b.level,
+                bonusType: b.type,
+                competenceYearMonth: b.competenceYearMonth,
+                paymentId: b.paymentId,
             },
         });
-    } catch (e: any) {
-        idempotencyTxOk = true;
-        log("IDEMPOTENCY_TX", "OK: bloqueou duplicidade de cashbackTransaction", {
-            error: e?.message,
-        });
     }
 
-    assert(idempotencyTxOk, "Idempotência de cashbackTransaction falhou: deveria bloquear duplicidade");
+    log("PHASE4_CASHBACK", "Cashback creditado para UNIQUE + RECURRENT em níveis 1..3");
 
-    // 7.2) referralBonus idempotente por eventKey
-    // Tentamos criar o mesmo bônus novamente (deve falhar).
-    // ------------------------------------------------------------------
-    let idempotencyBonusOk = false;
+    // ASSERT saldos finais esperados
+    const finalL1 = await prisma.cashbackWallet.findUnique({
+        where: { userId_type: { userId: receiverL1.id, type: WalletType.INTERNAL } },
+    });
+    const finalL2 = await prisma.cashbackWallet.findUnique({
+        where: { userId_type: { userId: receiverL2.id, type: WalletType.INTERNAL } },
+    });
+    const finalL3 = await prisma.cashbackWallet.findUnique({
+        where: { userId_type: { userId: receiverL3.id, type: WalletType.INTERNAL } },
+    });
+
+    log("PHASE4_ASSERT", "Saldos finais (L1/L2/L3)", { L1: finalL1, L2: finalL2, L3: finalL3 });
+
+    assert(finalL1?.balance === MLM.L1.amount * 2, "Fase 4 falhou: saldo L1 incorreto (esperado UNIQUE+RECURRENT)");
+    assert(finalL2?.balance === MLM.L2.amount * 2, "Fase 4 falhou: saldo L2 incorreto (esperado UNIQUE+RECURRENT)");
+    assert(finalL3?.balance === MLM.L3.amount * 2, "Fase 4 falhou: saldo L3 incorreto (esperado UNIQUE+RECURRENT)");
+
+    // ASSERT transações (2 por receiver: UNIQUE + RECURRENT)
+    const txL1 = await prisma.cashbackTransaction.findMany({ where: { userId: receiverL1.id } });
+    const txL2 = await prisma.cashbackTransaction.findMany({ where: { userId: receiverL2.id } });
+    const txL3 = await prisma.cashbackTransaction.findMany({ where: { userId: receiverL3.id } });
+
+    assert(txL1.length === 2, "Fase 4 falhou: tx count L1 incorreto (esperado 2)");
+    assert(txL2.length === 2, "Fase 4 falhou: tx count L2 incorreto (esperado 2)");
+    assert(txL3.length === 2, "Fase 4 falhou: tx count L3 incorreto (esperado 2)");
+
+    // Idempotência TX (deve bloquear)
     try {
-        await createReferralBonusOrThrow({
-            eventKey: bonusRecurrentL1.eventKey,
-            receiverId: lvl1.id,
-            payerId: payer.id,
-            level: 1,
-            type: "RECURRENT",
-            amount: 15,
-            paymentId: payment.id,
-            competenceYearMonth,
+        await creditCashbackIdempotent({
+            receiverId: receiverL1.id,
+            eventKey: bonusUniqueL1.eventKey,
+            amount: bonusUniqueL1.amount,
+            relatedId: String(bonusUniqueL1.id),
+            meta: { duplicate: true },
         });
-    } catch (e: any) {
-        idempotencyBonusOk = true;
-        log("IDEMPOTENCY_BONUS", "OK: bloqueou duplicidade de referralBonus", {
-            error: e?.message,
+        throw new Error("Fase 4 falhou: era para bloquear cashbackTransaction duplicada (UNIQUE L1)");
+    } catch (e) {
+        log("PHASE4_IDEMPOTENCY_TX", "OK: bloqueou duplicidade de cashbackTransaction", {
+            error: (e as Error)?.message ?? String(e),
         });
     }
 
-    assert(idempotencyBonusOk, "Idempotência de referralBonus falhou: deveria bloquear duplicidade");
+    // Idempotência ReferralBonus (unique constraint em eventKey)
+    try {
+        await prisma.referralBonus.create({
+            data: {
+                receiverId: receiverL1.id,
+                payerId: payer.id,
+                level: MLM.L1.level,
+                type: BonusType.RECURRENT,
+                amount: MLM.L1.amount,
+                paymentStatus: "PAID",
+                eventKey: bonusRecurrentL1.eventKey, // MESMA CHAVE
+                paymentId: paymentP4.id,
+                competenceYearMonth: competenceYM,
+            },
+        });
 
-    log("DONE", "=== PASS: Fase 4 MLM (UNIQUE + RECURRENT) + Cashback + Idempotência OK ===");
+        throw new Error("Fase 4 falhou: era para bloquear referralBonus duplicado por eventKey");
+    } catch (e) {
+        if (!isUniqueConstraintError(e)) {
+            throw e;
+        }
+        log("PHASE4_IDEMPOTENCY_BONUS", "OK: bloqueou duplicidade de referralBonus (unique eventKey)", {
+            error: (e as Error)?.message ?? String(e),
+            prismaCode: knownRequestErrorCode(e),
+        });
+    }
+
+    log("DONE", "=== PASS: Smoke Test Fase 1–4 OK (Schema + Cupom(min) + Cashback + MLM + Idempotência) ===");
 }
 
 main()
     .catch((e) => {
-        console.error("FAIL PHASE 4", e);
+        console.error("FAIL PHASES 1–4", e);
         process.exit(1);
     })
     .finally(async () => {
