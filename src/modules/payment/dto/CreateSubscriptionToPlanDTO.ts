@@ -11,25 +11,58 @@ const emptyStringToUndef = (value: unknown): string | undefined => {
 	return trimmed.length === 0 ? undefined : trimmed;
 };
 
+const toNumberOrUndef = (value: unknown): number | undefined => {
+	if (value == null) return undefined;
+
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) return undefined;
+		return value;
+	}
+
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		if (trimmed.length === 0) return undefined;
+
+		const normalized = trimmed.replace(/\./g, "").replace(",", ".");
+		const n = Number(normalized);
+
+		if (!Number.isFinite(n)) return undefined;
+		return n;
+	}
+
+	return undefined;
+};
+
 export const CreateSubscriptionToPlanSchema = z
 	.object({
+		// Plano obrigatório
 		plan_id: z
 			.number({
-				required_error: "ID do plano é obrigatório",
-				invalid_type_error: "ID do plano deve ser um número",
+				required_error: "plan_id é obrigatório",
+				invalid_type_error: "plan_id deve ser um número",
 			})
-			.int("ID do plano deve ser um inteiro")
-			.positive("ID do plano deve ser um número positivo"),
+			.int()
+			.positive("plan_id deve ser maior que 0"),
 
-		// Cupom opcional (""/null -> undefined)
+		// Carro obrigatório
+		carId: z
+			.number({
+				required_error: "carId é obrigatório",
+				invalid_type_error: "carId deve ser um número",
+			})
+			.int()
+			.positive("carId deve ser maior que 0"),
+
+		// Cupom opcional
 		coupon: z
 			.string()
 			.nullish()
 			.transform((v) => emptyStringToUndef(v)),
 
+		// Tipo de pagamento
 		type: z.enum(["creditCard", "pix"]).optional().default("creditCard"),
 
-		// CPF opcional: valida apenas se existir (sem exigir em pix)
+		// CPF opcional (valida apenas se existir)
 		cpf: z
 			.string()
 			.nullish()
@@ -43,32 +76,31 @@ export const CreateSubscriptionToPlanSchema = z
 				"CPF inválido",
 			),
 
-		carId: z
-			.number({
-				required_error: "ID do carro é obrigatório",
-				invalid_type_error: "ID do carro deve ser um número",
-			})
-			.int("ID do carro deve ser um inteiro")
-			.positive("ID do carro deve ser um número positivo"),
-
+		// Parcelas opcionais (regras finais são aplicadas no service)
 		installments: z
-			.number({
-				invalid_type_error: "Installments deve ser um número",
-			})
-			.int("Installments deve ser um inteiro")
-			.positive("Installments deve ser um número positivo")
-			.optional(),
+			.number()
+			.int()
+			.min(1, "installments deve ser >= 1")
+			.max(24, "installments deve ser <= 24")
+			.optional()
+			.transform((v) => (v === undefined ? undefined : v)),
 
-		washServiceId: z
-			.number({
-				invalid_type_error: "washServiceId deve ser um número",
-			})
-			.int("washServiceId deve ser um inteiro")
-			.positive("washServiceId deve ser um número positivo")
-			.optional(),
+		// Offset de timezone em minutos (default -180)
+		timeZoneOffset: z
+			.number()
+			.int()
+			.optional()
+			.default(-180),
 
-		timeZoneOffset: z.coerce.number().optional(),
+		// Cashback opcional (caso você use essa lógica na assinatura também)
+		cashbackAmount: z
+			.preprocess((v) => toNumberOrUndef(v), z.number().optional())
+			.refine(
+				(v) => v === undefined || v >= 0,
+				"cashbackAmount deve ser maior ou igual a 0",
+			),
 
+		// Dados do cartão (somente para creditCard)
 		creditCard: z
 			.object({
 				holderName: z.string(),
@@ -80,13 +112,13 @@ export const CreateSubscriptionToPlanSchema = z
 			.nullish()
 			.transform(nullishToUndef),
 
+		// Dados do titular do cartão
 		creditCardHolderInfo: z
 			.object({
 				name: z.string(),
 				email: z.string().email(),
 				cpfCnpj: z.string(),
 
-				// ✅ OPÇÃO A: phone não é obrigatório no schema; vira obrigatório no refine quando creditCard
 				phone: z
 					.string()
 					.optional()
@@ -118,12 +150,10 @@ export const CreateSubscriptionToPlanSchema = z
 			.transform(nullishToUndef),
 	})
 
-	// 🔒 Regra: cartão exige dados do cartão
+	// Regra: cartão exige dados do cartão
 	.refine(
 		(data) => {
-			if (data.type === "creditCard" && !data.creditCard) {
-				return false;
-			}
+			if (data.type === "creditCard" && !data.creditCard) return false;
 			return true;
 		},
 		{
@@ -132,12 +162,11 @@ export const CreateSubscriptionToPlanSchema = z
 		},
 	)
 
-	// 🔒 Regra: cartão exige dados do titular
+	// Regra: cartão exige dados do titular
 	.refine(
 		(data) => {
-			if (data.type === "creditCard" && !data.creditCardHolderInfo) {
+			if (data.type === "creditCard" && !data.creditCardHolderInfo)
 				return false;
-			}
 			return true;
 		},
 		{
@@ -146,7 +175,7 @@ export const CreateSubscriptionToPlanSchema = z
 		},
 	)
 
-	// ✅ OPÇÃO A — telefone obrigatório APENAS para cartão
+	// Telefone obrigatório APENAS para cartão
 	.refine(
 		(data) => {
 			if (data.type === "pix") return true;
@@ -158,6 +187,4 @@ export const CreateSubscriptionToPlanSchema = z
 		},
 	);
 
-export type CreateSubscriptionToPlanDTO = z.infer<
-	typeof CreateSubscriptionToPlanSchema
->;
+export type CreateSubscriptionToPlanDTO = z.infer<typeof CreateSubscriptionToPlanSchema>;

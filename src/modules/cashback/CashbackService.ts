@@ -59,4 +59,43 @@ export class CashbackService {
     public async getTransactionsByUserId(userId: number) {
         return this.txRepo.findByUserId(userId);
     }
+    public async debitForPayment(params: {
+        userId: number;
+        paymentId: number;
+        amount: number;
+    }): Promise<void> {
+        const { userId, paymentId, amount } = params;
+
+        if (amount <= 0) return;
+
+        const wallet = await this.walletRepo.getByUserId(userId);
+        if (!wallet) {
+            throw new AppError("Carteira de cashback não encontrada.", 404);
+        }
+
+        if (wallet.balance < amount) {
+            throw new AppError("Saldo de cashback insuficiente.", 400);
+        }
+
+        const eventKey = `DEBIT:PAYMENT:${paymentId}:USER:${userId}`;
+
+        const alreadyUsed = await this.txRepo.existsByEventKey(eventKey);
+        if (alreadyUsed) return;
+
+        await this.txRepo.create({
+            userId,
+            type: "USED",
+            source: "SUBSCRIPTION_DEBIT",
+            amount,
+            relatedId: String(paymentId),
+            eventKey,
+            meta: {
+                paymentId,
+                reason: "Pagamento com cashback",
+            },
+        });
+
+        await this.walletRepo.decrementBalance(wallet.id, amount);
+    }
+
 }
