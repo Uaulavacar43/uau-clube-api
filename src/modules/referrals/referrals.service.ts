@@ -1,12 +1,10 @@
 import { AppError } from "../../error/AppError";
 import type { User } from "../../entities/User";
-import { ReferralBonus } from "../../entities/ReferralBonus";
 import type {
     CreateUserReferralInput,
     IUserRepository,
     ReferralSource,
 } from "../../repositories/interfaces/IUserRepository";
-import type { IReferralRepository } from "../../repositories/interfaces/IReferralRepository";
 
 export interface AttachReferralOnSignupInput {
     userId: number;
@@ -28,10 +26,7 @@ export interface ValidateReferralResult {
 }
 
 export class ReferralsService {
-    constructor(
-        private readonly userRepository: IUserRepository,
-        private readonly referralRepository?: IReferralRepository, // opcional (FASE 1)
-    ) {}
+    constructor(private readonly userRepository: IUserRepository) {}
 
     /**
      * Resolve o referrer (quem indicou) via referralCode.
@@ -41,33 +36,41 @@ export class ReferralsService {
         const code = (referralCode ?? "").trim();
         if (!code) return null;
 
+        // withIsDeleted=false para não aceitar deletados
         const referrer = await this.userRepository.findByReferralCode(code, false);
         if (!referrer) return null;
 
-        if (referrer.status !== "ACTIVE") return null;
+        if ((referrer as any).status && (referrer as any).status !== "ACTIVE") {
+            return null;
+        }
 
         return referrer;
     }
 
     /**
-     * Retorna o mesmo payload do endpoint /referrals/validate:
-     * - isValid: boolean
-     * - referrer: { id, name } | null
-     *
-     * Assim o controller usa esse método e ele não fica "unused".
+     * Mesmo payload do endpoint /referrals/validate
      */
     public async validateReferral(referralCode: string): Promise<ValidateReferralResult> {
         const referrer = await this.resolveReferrer(referralCode);
 
         return {
             isValid: Boolean(referrer),
-            referrer: referrer ? { id: referrer.id, name: referrer.name } : null,
+            referrer: referrer ? { id: (referrer as any).id, name: (referrer as any).name } : null,
         };
     }
 
-    public async attachReferralOnSignup(
-        input: AttachReferralOnSignupInput,
-    ): Promise<void> {
+    /**
+     * FASE 1:
+     * - valida inputs
+     * - resolve referrer por id ou code
+     * - bloqueia auto-indicação
+     * - bloqueia troca (se já tem referrerId ou já tem auditoria)
+     * - grava vínculo (User.referrerId)
+     * - grava auditoria (UserReferral)
+     *
+     * Importante: NÃO gera bônus aqui.
+     */
+    public async attachReferralOnSignup(input: AttachReferralOnSignupInput): Promise<void> {
         const userId = Number(input.userId);
 
         if (!userId || Number.isNaN(userId)) {
@@ -76,6 +79,7 @@ export class ReferralsService {
 
         const source: ReferralSource = input.source ?? "UNKNOWN";
 
+        // withIsDeleted=true para suportar cenários onde você quer bloquear mesmo se deletado (dependendo da regra)
         const user = await this.userRepository.findById(userId, true);
         if (!user) {
             throw new AppError("Usuário não encontrado.", 404);
@@ -86,32 +90,37 @@ export class ReferralsService {
             Boolean((input.referralCode ?? "").trim());
 
         if (!hasAnyReferralInfo) {
+            // Sem indicação: não faz nada
             return;
         }
 
-        if (user.referrerId && user.referrerId > 0) {
+        // Bloqueia se já existe vínculo rápido
+        if ((user as any).referrerId && (user as any).referrerId > 0) {
             throw new AppError("Usuário já possui referenciador associado.", 409);
         }
 
-        const alreadyHasFormalReferral = await this.userRepository.hasReferralReceived(
-            userId,
-        );
+        // Bloqueia se já existe auditoria formal de indicação recebida
+        const alreadyHasFormalReferral = await this.userRepository.hasReferralReceived(userId);
         if (alreadyHasFormalReferral) {
             throw new AppError("Usuário já possui indicação registrada.", 409);
         }
 
         let referrer: User | null = null;
 
+        // 1) Se veio referrerId, resolve por ID
         if (input.referrerId && input.referrerId > 0) {
             referrer = await this.userRepository.findById(input.referrerId, false);
+
             if (!referrer) {
                 throw new AppError("Referenciador não encontrado.", 404);
             }
-            if (referrer.status !== "ACTIVE") {
+
+            if ((referrer as any).status && (referrer as any).status !== "ACTIVE") {
                 throw new AppError("Referenciador inativo.", 400);
             }
         }
 
+        // 2) Se não veio referrerId (ou não achou), resolve por referralCode
         if (!referrer) {
             const code = (input.referralCode ?? "").trim();
             referrer = await this.resolveReferrer(code);
@@ -121,14 +130,17 @@ export class ReferralsService {
             }
         }
 
-        if (referrer.id === userId) {
+        // Auto-referral
+        if ((referrer as any).id === userId) {
             throw new AppError("Auto-indicação não é permitida.", 400);
         }
 
-        await this.userRepository.updateReferrerId(userId, referrer.id);
+        // Grava vínculo rápido (nível 1)
+        await this.userRepository.updateReferrerId(userId, (referrer as any).id);
 
+        // Grava auditoria formal (UserReferral)
         const referralAudit: CreateUserReferralInput = {
-            referrerId: referrer.id,
+            referrerId: (referrer as any).id,
             referredId: userId,
             source,
             deviceId: input.deviceId ?? null,
@@ -138,86 +150,5 @@ export class ReferralsService {
         };
 
         await this.userRepository.createUserReferral(referralAudit);
-
-        if (!this.referralRepository) {
-            return;
-        }
-
-        await this.createPendingUniqueBonusesUpToLevel3({
-            payerId: userId,
-            level1ReceiverId: referrer.id,
-        });
-    }
-
-    private async createPendingUniqueBonusesUpToLevel3(params: {
-        payerId: number;
-        level1ReceiverId: number;
-    }): Promise<void> {
-        if (!this.referralRepository) return;
-
-        const { payerId, level1ReceiverId } = params;
-
-        const level1 = new ReferralBonus({
-            id: 0,
-            receiverId: level1ReceiverId,
-            payerId,
-            level: 1,
-            amount: 10,
-            type: "UNIQUE",
-            paymentStatus: "PENDING",
-        });
-        await this.referralRepository.save(level1);
-
-        const level1Receiver = await this.userRepository.findById(
-            level1ReceiverId,
-            false,
-        );
-        const level2ReceiverId = level1Receiver?.referrerId ?? null;
-
-        if (level2ReceiverId && level2ReceiverId > 0) {
-            const level2Receiver = await this.userRepository.findById(
-                level2ReceiverId,
-                false,
-            );
-            if (level2Receiver && level2Receiver.status === "ACTIVE") {
-                const level2 = new ReferralBonus({
-                    id: 0,
-                    receiverId: level2ReceiverId,
-                    payerId,
-                    level: 2,
-                    amount: 5,
-                    type: "UNIQUE",
-                    paymentStatus: "PENDING",
-                });
-                await this.referralRepository.save(level2);
-            }
-        }
-
-        if (level2ReceiverId && level2ReceiverId > 0) {
-            const level2Receiver = await this.userRepository.findById(
-                level2ReceiverId,
-                false,
-            );
-            const level3ReceiverId = level2Receiver?.referrerId ?? null;
-
-            if (level3ReceiverId && level3ReceiverId > 0) {
-                const level3Receiver = await this.userRepository.findById(
-                    level3ReceiverId,
-                    false,
-                );
-                if (level3Receiver && level3Receiver.status === "ACTIVE") {
-                    const level3 = new ReferralBonus({
-                        id: 0,
-                        receiverId: level3ReceiverId,
-                        payerId,
-                        level: 3,
-                        amount: 5,
-                        type: "UNIQUE",
-                        paymentStatus: "PENDING",
-                    });
-                    await this.referralRepository.save(level3);
-                }
-            }
-        }
     }
 }

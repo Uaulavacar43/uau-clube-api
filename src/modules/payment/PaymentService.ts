@@ -42,6 +42,7 @@ import {
 import type { CreatePaymentDTO } from "./dto/CreatePaymentDTO";
 import type { CreateSubscriptionToPlanDTO } from "./dto/CreateSubscriptionToPlanDTO";
 import type { GetAllPaymentsWithDetailsDTO } from "./dto/GetAllPaymentsWithDetailsDTO";
+import {ReferralBonusService} from "../referrals/ReferralBonusService";
 
 /**
  * Serviço de Pagamentos / Assinaturas integrados ao ASAAS.
@@ -83,6 +84,7 @@ export class PaymentService {
         private readonly washServiceRepository: IWashServiceRepository,
         private readonly individualServicePurchaseRepository: IIndividualServicePurchaseRepository,
         private readonly carRepository: IUserCarRepository,
+        private readonly referralBonusService: ReferralBonusService,
     ) {}
 
     // ---------------------------------------------------------------------
@@ -102,7 +104,7 @@ export class PaymentService {
 
     /**
      * Converte um "raw" (retorno de ORM/repo) em instância de Subscription,
-     * garantindo disponibilidade dos métodos de domínio:
+     * garantindo disponibilidade dos métodos:
      * - isCurrentlyActive()
      * - isExpired()
      * - isCanceled()
@@ -187,7 +189,9 @@ export class PaymentService {
         return trimmed;
     }
 
-    private resolvePaymentType(type: CreatePaymentDTO["type"]): "creditCard" | "pix" {
+    private resolvePaymentType(
+        type: CreatePaymentDTO["type"],
+    ): "creditCard" | "pix" {
         return (type ?? "creditCard") === "pix" ? "pix" : "creditCard";
     }
 
@@ -336,7 +340,11 @@ export class PaymentService {
             await asaasGetOrCreateRandomPixKey();
         }
 
-        const asaasPayment = await asaasCreatePayment({
+        // -----------------------------------------------------------------
+        // CORREÇÃO CRÍTICA:
+        // Para PIX, NÃO enviar creditCard nem creditCardHolderInfo ao ASAAS.
+        // -----------------------------------------------------------------
+        const asaasPaymentPayload: any = {
             billingType,
             dueDate: new Date().toISOString().split("T")[0],
             value: amount,
@@ -354,9 +362,14 @@ export class PaymentService {
                     value: coupon.discountValue,
                     type: coupon.discountType,
                 },
-            creditCard: creditCard,
-            creditCardHolderInfo: creditCardHolderInfo,
-        });
+        };
+
+        if (billingType === ASAASPaymentBillingTypeEnum.CREDIT_CARD) {
+            asaasPaymentPayload.creditCard = creditCard;
+            asaasPaymentPayload.creditCardHolderInfo = creditCardHolderInfo;
+        }
+
+        const asaasPayment = await asaasCreatePayment(asaasPaymentPayload);
 
         let pixQrCode: string | null = null;
         let pixPayload: string | null = null;
@@ -657,7 +670,11 @@ export class PaymentService {
                 }),
             );
 
-            const asaasPayment = await asaasCreatePayment({
+            // -----------------------------------------------------------------
+            // CORREÇÃO CRÍTICA:
+            // Para PIX, NÃO enviar creditCard nem creditCardHolderInfo ao ASAAS.
+            // -----------------------------------------------------------------
+            const asaasPaymentPayload: any = {
                 billingType: billingPaymentType,
                 dueDate: dateWithTimeZone.toISOString().split("T")[0],
                 value: plan.price,
@@ -687,9 +704,14 @@ export class PaymentService {
                         value: coupon.discountValue,
                         type: coupon.discountType,
                     },
-                creditCard: creditCard,
-                creditCardHolderInfo: creditCardHolderInfo,
-            });
+            };
+
+            if (billingPaymentType === ASAASPaymentBillingTypeEnum.CREDIT_CARD) {
+                asaasPaymentPayload.creditCard = creditCard;
+                asaasPaymentPayload.creditCardHolderInfo = creditCardHolderInfo;
+            }
+
+            const asaasPayment = await asaasCreatePayment(asaasPaymentPayload);
 
             subscription.installmentIdAsaas = asaasPayment.installment
                 ? asaasPayment.installment
@@ -1113,7 +1135,10 @@ export class PaymentService {
             }
 
             // Se não estiver ativa AGORA, tenta recalcular a validade com base no último pagamento PAID compatível
-            if (!subscriptionByPlate.isCurrentlyActive() && !subscriptionByPlate.isCanceled()) {
+            if (
+                !subscriptionByPlate.isCurrentlyActive() &&
+                !subscriptionByPlate.isCanceled()
+            ) {
                 const lastPaidPayment =
                     await this.findLastPaidPlanPaymentForUser(userId);
 
@@ -1256,7 +1281,8 @@ export class PaymentService {
         const createdSubscriptionRaw =
             await this.subscriptionRepository.create(subscription);
 
-        const createdSubscription = this.hydrateSubscription(createdSubscriptionRaw);
+        const createdSubscription =
+            this.hydrateSubscription(createdSubscriptionRaw);
 
         console.log(
             `[ensureSubscriptionForUserAndCarFromExistingPayments] Nova assinatura ${createdSubscription.id} criada a partir do pagamento PAID e vinculada ao carro ${carId}. isActive=${createdSubscription.isActive}, expiresAt=${createdSubscription.expiresAt?.toISOString()}`,
@@ -1319,7 +1345,9 @@ export class PaymentService {
                 paymentType === "creditCard" ? data.creditCard : undefined;
 
             const creditCardHolderInfo =
-                paymentType === "creditCard" ? data.creditCardHolderInfo : undefined;
+                paymentType === "creditCard"
+                    ? data.creditCardHolderInfo
+                    : undefined;
 
             if (billingType === ASAASSubscriptionBillingTypeEnum.CREDIT_CARD) {
                 if (!creditCard) {
@@ -1327,7 +1355,10 @@ export class PaymentService {
                 }
 
                 if (!creditCardHolderInfo) {
-                    throw new AppError("Faltam informações do titular do cartão", 400);
+                    throw new AppError(
+                        "Faltam informações do titular do cartão",
+                        400,
+                    );
                 }
             }
 
@@ -1355,8 +1386,13 @@ export class PaymentService {
                 }),
             );
 
-            const localSubscription = this.hydrateSubscription(localSubscriptionRaw);
+            const localSubscription =
+                this.hydrateSubscription(localSubscriptionRaw);
 
+            // -----------------------------------------------------------------
+            // CORREÇÃO CRÍTICA:
+            // Para PIX, NÃO enviar creditCard nem creditCardHolderInfo ao ASAAS.
+            // -----------------------------------------------------------------
             const payload: ASAASCreateSubscriptionDTO = {
                 customer: customerId,
                 nextDueDate: startDate.toISOString().split("T")[0],
@@ -1370,8 +1406,6 @@ export class PaymentService {
                     couponId: coupon?.id,
                     subId: localSubscription.id,
                 }),
-                creditCard: creditCard,
-                creditCardHolderInfo: creditCardHolderInfo,
                 discount: !coupon
                     ? undefined
                     : {
@@ -1380,8 +1414,16 @@ export class PaymentService {
                     },
             };
 
+            if (billingType === ASAASSubscriptionBillingTypeEnum.CREDIT_CARD) {
+                (payload as any).creditCard = creditCard;
+                (payload as any).creditCardHolderInfo = creditCardHolderInfo;
+            }
+
             console.log("[createAsaasSubscription] Criando assinatura no Asaas...");
-            const asaasSubscription = await asaasCreateSubscription(payload, customerId);
+            const asaasSubscription = await asaasCreateSubscription(
+                payload,
+                customerId,
+            );
 
             localSubscription.subscriptionIdAsaas = asaasSubscription.id;
             localSubscription.amount = asaasSubscription.value;
@@ -1424,7 +1466,9 @@ export class PaymentService {
 
             if (billingType === ASAASSubscriptionBillingTypeEnum.PIX) {
                 console.log("[createAsaasSubscription] Recuperando QR code PIX...");
-                const asaasPixCode = await asaasGetPixQrCode(firstPaymentAsaas.id);
+                const asaasPixCode = await asaasGetPixQrCode(
+                    firstPaymentAsaas.id,
+                );
                 pixQrCode = asaasPixCode.encodedImage;
                 pixPayload = asaasPixCode.payload;
                 console.log(
@@ -1477,7 +1521,10 @@ export class PaymentService {
             if (error instanceof AppError) {
                 throw error;
             }
-            throw new AppError("Erro interno ao processar assinatura recorrente", 500);
+            throw new AppError(
+                "Erro interno ao processar assinatura recorrente",
+                500,
+            );
         }
     }
 
@@ -1718,6 +1765,12 @@ export class PaymentService {
                         parseError,
                     );
                 }
+                await this.referralBonusService.generateOnFirstPaidSubscription({
+                    payerId: userId as number,
+                    subscriptionId: subId as number,
+                });
+
+
             }
 
             console.log(
@@ -1803,7 +1856,10 @@ export class PaymentService {
                     const asaasPaymentRaw = await asaasGetPayment(paymentAsaasId);
                     const asaasPayment = asaasPaymentRaw as AsaasPaymentLike;
 
-                    if (!body.payment.externalReference && asaasPayment.externalReference) {
+                    if (
+                        !body.payment.externalReference &&
+                        asaasPayment.externalReference
+                    ) {
                         body.payment.externalReference = asaasPayment.externalReference;
 
                         try {
@@ -1829,15 +1885,20 @@ export class PaymentService {
                     }
 
                     const subscriptionAsaasId =
-                        body.payment.subscription ?? asaasPayment.subscription ?? undefined;
+                        body.payment.subscription ??
+                        asaasPayment.subscription ??
+                        undefined;
 
                     const installmentAsaasId =
-                        body.payment.installment ?? asaasPayment.installment ?? undefined;
+                        body.payment.installment ??
+                        asaasPayment.installment ??
+                        undefined;
 
                     if ((!userId || !planId) && subscriptionAsaasId) {
-                        const localSubRaw = await this.subscriptionRepository.getByAsaasId(
-                            subscriptionAsaasId,
-                        );
+                        const localSubRaw =
+                            await this.subscriptionRepository.getByAsaasId(
+                                subscriptionAsaasId,
+                            );
                         if (localSubRaw) {
                             const localSub = this.hydrateSubscription(localSubRaw);
                             userId = userId ?? localSub.userId;
@@ -1867,7 +1928,10 @@ export class PaymentService {
                         body.payment.billingType = asaasPayment.billingType;
                     }
                 } catch (fallbackError) {
-                    console.error("[handlePaymentWebhook] Fallback ASAAS falhou:", fallbackError);
+                    console.error(
+                        "[handlePaymentWebhook] Fallback ASAAS falhou:",
+                        fallbackError,
+                    );
                 }
             }
 
@@ -1881,7 +1945,10 @@ export class PaymentService {
                     console.error(
                         `[handlePaymentWebhook] Usuário ID ${userId} não encontrado. Pulando inserção de pagamento.`,
                     );
-                    return { status: 200, message: `Usuário ID ${userId} não encontrado` };
+                    return {
+                        status: 200,
+                        message: `Usuário ID ${userId} não encontrado`,
+                    };
                 }
             } else {
                 console.warn(
@@ -1899,7 +1966,10 @@ export class PaymentService {
                     console.error(
                         `[handlePaymentWebhook] Plano ID ${planId} não encontrado. Pulando inserção.`,
                     );
-                    return { status: 200, message: `Plano ID ${planId} não encontrado` };
+                    return {
+                        status: 200,
+                        message: `Plano ID ${planId} não encontrado`,
+                    };
                 }
             }
 
@@ -1909,7 +1979,10 @@ export class PaymentService {
                     console.error(
                         `[handlePaymentWebhook] Cupom ID ${couponId} não encontrado. Pulando inserção.`,
                     );
-                    return { status: 200, message: `Cupom ID ${couponId} não encontrado` };
+                    return {
+                        status: 200,
+                        message: `Cupom ID ${couponId} não encontrado`,
+                    };
                 }
             }
 
@@ -2021,7 +2094,11 @@ export class PaymentService {
     private calculatePlanExpiration(plan: Plan, referenceDate: Date): Date {
         const baseDate = new Date(referenceDate.getTime());
 
-        if (plan.duration !== undefined && plan.duration !== null && plan.duration > 0) {
+        if (
+            plan.duration !== undefined &&
+            plan.duration !== null &&
+            plan.duration > 0
+        ) {
             baseDate.setDate(baseDate.getDate() + plan.duration);
         } else {
             switch (plan.periodicityType) {
@@ -2045,7 +2122,11 @@ export class PaymentService {
             }
         }
 
-        if (plan.extraMonths !== undefined && plan.extraMonths !== null && plan.extraMonths > 0) {
+        if (
+            plan.extraMonths !== undefined &&
+            plan.extraMonths !== null &&
+            plan.extraMonths > 0
+        ) {
             baseDate.setMonth(baseDate.getMonth() + plan.extraMonths);
         }
 
@@ -2262,7 +2343,9 @@ export class PaymentService {
                                 const subRaw = await this.subscriptionRepository.findById(
                                     externalReference.subId,
                                 );
-                                subscription = subRaw ? this.hydrateSubscription(subRaw) : null;
+                                subscription = subRaw
+                                    ? this.hydrateSubscription(subRaw)
+                                    : null;
                             }
                         } catch (error) {
                             console.error(

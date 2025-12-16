@@ -12,8 +12,9 @@ export interface ISubscriptionRepository {
 	create(data: Subscription): Promise<Subscription>;
 	update(
 		subscriptionId: number,
-		data: Partial<Omit<Subscription, "car" | "id" | "plan">>,
+		data: Partial<Omit<Subscription, "id">> | Subscription,
 	): Promise<Subscription>;
+
 	cancel(subscriptionId: number): Promise<void>;
 
 	getByAsaasId(subscriptionIdAsaas: string): Promise<Subscription | null>;

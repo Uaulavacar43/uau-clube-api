@@ -6,6 +6,11 @@ import { PrismaSubscriptionRepository } from "../../repositories/implementations
 import { PrismaUserCarRepository } from "../../repositories/implementations/PrismaUserCarRepository";
 import { PrismaUserRepository } from "../../repositories/implementations/PrismaUserRepository";
 import { PrismaWashServiceRepository } from "../../repositories/implementations/PrismaWashServiceRepository";
+
+// ✅ NOVOS IMPORTS
+import { PrismaReferralBonusRepository } from "../../repositories/implementations/PrismaReferralBonusRepository";
+import { ReferralBonusService } from "../referrals/ReferralBonusService";
+
 import { PaymentController } from "./PaymentController";
 import { PaymentService } from "./PaymentService";
 import paymentRoutes from "./routes";
@@ -20,6 +25,13 @@ const individualServicePurchaseRepository =
 	new PrismaIndividualServicePurchaseRepository();
 const userCarRepository = new PrismaUserCarRepository();
 
+// ✅ NOVOS SINGLETONS
+const referralBonusRepository = new PrismaReferralBonusRepository();
+const referralBonusService = new ReferralBonusService(
+	userRepository,
+	referralBonusRepository,
+);
+
 const paymentService = new PaymentService(
 	paymentRepository,
 	planRepository,
@@ -29,7 +41,11 @@ const paymentService = new PaymentService(
 	washServiceRepository,
 	individualServicePurchaseRepository,
 	userCarRepository,
+
+	// ✅ NOVO ARGUMENTO
+	referralBonusService,
 );
+
 export const paymentController = new PaymentController(paymentService);
 
 export default paymentRoutes;

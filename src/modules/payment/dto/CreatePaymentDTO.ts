@@ -13,17 +13,24 @@ const emptyStringToUndef = (value: unknown): string | undefined => {
 
 export const CreatePaymentSchema = z
 	.object({
-		// Aceita null/"" e normaliza para undefined
+		// Cupom opcional (null/"" → undefined)
 		coupon: z
 			.string()
 			.nullish()
 			.transform((v) => emptyStringToUndef(v)),
 
-		washServices: z.array(z.number()).min(1, "Selecione pelo menos um serviço"),
+		// Serviços obrigatórios
+		washServices: z
+			.array(z.number())
+			.min(1, "Selecione pelo menos um serviço"),
 
-		type: z.enum(["creditCard", "pix"]).optional().default("creditCard"),
+		// Tipo de pagamento
+		type: z
+			.enum(["creditCard", "pix"])
+			.optional()
+			.default("creditCard"),
 
-		// CPF opcional: aceita null/"" e só valida quando existir
+		// CPF opcional (valida apenas se existir)
 		cpf: z
 			.string()
 			.nullish()
@@ -32,8 +39,12 @@ export const CreatePaymentSchema = z
 				if (!v) return undefined;
 				return v.replace(/\D/g, "");
 			})
-			.refine((value) => value === undefined || cpf.isValid(value), "CPF inválido"),
+			.refine(
+				(value) => value === undefined || cpf.isValid(value),
+				"CPF inválido",
+			),
 
+		// Dados do cartão (somente para creditCard)
 		creditCard: z
 			.object({
 				holderName: z.string(),
@@ -45,12 +56,19 @@ export const CreatePaymentSchema = z
 			.nullish()
 			.transform(nullishToUndef),
 
+		// Dados do titular do cartão
 		creditCardHolderInfo: z
 			.object({
 				name: z.string(),
 				email: z.string().email(),
 				cpfCnpj: z.string(),
-				phone: z.string(),
+
+				// ✅ OPÇÃO A: phone NÃO é obrigatório no schema
+				// (a obrigação real acontece no refine quando type === "creditCard")
+				phone: z
+					.string()
+					.optional()
+					.transform((v) => emptyStringToUndef(v)),
 
 				postalCode: z
 					.string()
@@ -64,7 +82,6 @@ export const CreatePaymentSchema = z
 					.transform(() => "4569")
 					.default("4569"),
 
-				// Aceita null/"" e normaliza para undefined
 				addressComplement: z
 					.string()
 					.nullish()
@@ -78,19 +95,45 @@ export const CreatePaymentSchema = z
 			.nullish()
 			.transform(nullishToUndef),
 	})
+
+	// 🔒 Regra: cartão exige dados do cartão
 	.refine(
 		(data) => {
-			if (data.type === "creditCard" && !data.creditCard) return false;
+			if (data.type === "creditCard" && !data.creditCard) {
+				return false;
+			}
 			return true;
 		},
-		{ message: "Faltam informações cartão", path: ["creditCard"] },
+		{
+			message: "Faltam informações cartão",
+			path: ["creditCard"],
+		},
 	)
+
+	// 🔒 Regra: cartão exige dados do titular
 	.refine(
 		(data) => {
-			if (data.type === "creditCard" && !data.creditCardHolderInfo) return false;
+			if (data.type === "creditCard" && !data.creditCardHolderInfo) {
+				return false;
+			}
 			return true;
 		},
-		{ message: "Faltam informações do titular do cartão", path: ["creditCardHolderInfo"] },
+		{
+			message: "Faltam informações do titular do cartão",
+			path: ["creditCardHolderInfo"],
+		},
+	)
+
+	// ✅ OPÇÃO A — telefone obrigatório APENAS para cartão
+	.refine(
+		(data) => {
+			if (data.type === "pix") return true;
+			return Boolean(data.creditCardHolderInfo?.phone);
+		},
+		{
+			message: "Telefone é obrigatório para cartão",
+			path: ["creditCardHolderInfo", "phone"],
+		},
 	);
 
 export type CreatePaymentDTO = z.infer<typeof CreatePaymentSchema>;
