@@ -42,7 +42,51 @@ import {
 import type { CreatePaymentDTO } from "./dto/CreatePaymentDTO";
 import type { CreateSubscriptionToPlanDTO } from "./dto/CreateSubscriptionToPlanDTO";
 import type { GetAllPaymentsWithDetailsDTO } from "./dto/GetAllPaymentsWithDetailsDTO";
-import {ReferralBonusService} from "../referrals/ReferralBonusService";
+import { ReferralBonusService } from "../referrals/ReferralBonusService";
+
+/**
+ * ---------------------------------------------------------------------
+ * Tipos internos para MODIFIERS do ASAAS (Fase 4 pronta)
+ * ---------------------------------------------------------------------
+ *
+ * - discount: já usado hoje (e corrigindo TS2322)
+ * - fine/interest: previstos para fase 4 (sem refatorar depois)
+ */
+type AsaasDiscountType = "PERCENTAGE" | "FIXED";
+
+type AsaasDiscountPayload = {
+    value: number;
+    dueDateLimitDays?: number;
+    type: AsaasDiscountType;
+};
+
+/**
+ * Fase 4 (previsto):
+ * Multa e Juros (se/quando você for aplicar regras financeiras no ASAAS)
+ * Observação: mantenho os tipos genéricos e compatíveis estruturalmente.
+ */
+type AsaasFineType = "PERCENTAGE" | "FIXED";
+type AsaasFinePayload = {
+    value: number;
+    type: AsaasFineType;
+};
+
+/**
+ * Em muitos gateways, juros é percentual por período (ex.: ao mês).
+ * Ajuste conforme o tipo real do seu DTO ASAAS se necessário.
+ */
+type AsaasInterestPayload = {
+    value: number;
+};
+
+type AsaasBillingModifiers = {
+    discount?: AsaasDiscountPayload;
+    fine?: AsaasFinePayload;
+    interest?: AsaasInterestPayload;
+};
+
+// Para tipar payloads diretamente a partir das funções util (evita “type: string”)
+type AsaasCreatePaymentPayload = Parameters<typeof asaasCreatePayment>[0];
 
 /**
  * Serviço de Pagamentos / Assinaturas integrados ao ASAAS.
@@ -73,8 +117,24 @@ import {ReferralBonusService} from "../referrals/ReferralBonusService";
  *   - subscription.isActive reflete se expiresAt >= agora;
  *   - Quando expiresAt < agora, subscriptionStatus passa a "SUSPENDED" (expirada / sem direito a uso), mas não "CANCELED".
  *   - A reativação virá apenas por um novo Payment PAID, que recalcula a validade.
+ *
+ * BÔNUS DE INDICAÇÃO (ReferralBonusService):
+ * - UNIQUE: somente no PRIMEIRO Payment PAID de uma assinatura (idempotência por payerId + subscriptionId).
+ * - RECURRENT: a cada Payment PAID, por competência (YYYY-MM), também idempotente por eventKey.
+ *
+ * REGRA CRÍTICA DE CUPOM (NOVA):
+ * - Cupom NUNCA pode cobrir 100% do custo.
+ * - Deve existir cobrança mínima (> 0) e assinatura só ativa após PAID real.
+ *
+ * ---------------------------------------------------------------------
+ * FASE 3 (previsto):
+ * - Com constraint no banco (amount > 0), este service não pode tentar persistir amount <= 0.
+ * - Portanto: runtime clamp para garantir amount mínimo em todas as entradas (create/webhook).
+ * ---------------------------------------------------------------------
  */
 export class PaymentService {
+    private static readonly MINIMUM_CHARGE_AMOUNT = 1;
+
     constructor(
         private readonly paymentRepository: IPaymentRepository,
         private readonly planRepository: IPlanRepository,
@@ -228,6 +288,107 @@ export class PaymentService {
     }
 
     // ---------------------------------------------------------------------
+    // FASE 3: Proteções para não persistir amount <= 0 (constraint DB)
+    // ---------------------------------------------------------------------
+
+    private ensureMinimumAmount(value: number, minimum = PaymentService.MINIMUM_CHARGE_AMOUNT): number {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return minimum;
+        if (n <= 0) return minimum;
+        // Evita ruído de floating:
+        return Number(n.toFixed(2));
+    }
+
+    /**
+     * Helper para montar “modifiers” do ASAAS com o padrão único:
+     * - hoje: discount
+     * - fase 4: fine, interest
+     *
+     * Importante: só adiciona propriedades quando elas existem,
+     * para evitar enviar `discount: undefined`.
+     */
+    private buildAsaasBillingModifiers(mod: AsaasBillingModifiers): Partial<AsaasBillingModifiers> {
+        const out: AsaasBillingModifiers = {};
+
+        if (mod.discount) out.discount = mod.discount;
+        if (mod.fine) out.fine = mod.fine;
+        if (mod.interest) out.interest = mod.interest;
+
+        return out;
+    }
+
+    // ---------------------------------------------------------------------
+    // REGRA DE CUPOM (mínimo a pagar)
+    // ---------------------------------------------------------------------
+
+    private applyCouponWithMinimumCharge(
+        baseAmount: number,
+        coupon: Coupon | null,
+        minimumCharge: number = PaymentService.MINIMUM_CHARGE_AMOUNT,
+    ): { finalAmount: number; asaasDiscount?: AsaasDiscountPayload } {
+        if (!coupon) {
+            return { finalAmount: baseAmount };
+        }
+
+        if (baseAmount <= 0) {
+            return { finalAmount: baseAmount };
+        }
+
+        // garante mínimo local (fase 3)
+        const minCharge = this.ensureMinimumAmount(minimumCharge, PaymentService.MINIMUM_CHARGE_AMOUNT);
+
+        const maxDiscount = Math.max(0, baseAmount - minCharge);
+
+        if (maxDiscount <= 0) {
+            return { finalAmount: minCharge };
+        }
+
+        // Normaliza o discountType do cupom para o union aceito pelo ASAAS
+        const discountType: AsaasDiscountType =
+            coupon.discountType === "PERCENTAGE" ? "PERCENTAGE" : "FIXED";
+
+        if (discountType === "PERCENTAGE") {
+            const requestedPercent = Number(coupon.discountValue) || 0;
+            const requestedDiscount = (baseAmount * requestedPercent) / 100;
+
+            const appliedDiscount = Math.min(requestedDiscount, maxDiscount);
+            const finalAmount = baseAmount - appliedDiscount;
+
+            const effectivePercent =
+                baseAmount > 0 ? (appliedDiscount / baseAmount) * 100 : 0;
+
+            if (effectivePercent <= 0) {
+                return { finalAmount };
+            }
+
+            return {
+                finalAmount: this.ensureMinimumAmount(finalAmount, minCharge),
+                asaasDiscount: {
+                    value: Number(effectivePercent.toFixed(2)),
+                    type: "PERCENTAGE",
+                },
+            };
+        }
+
+        // FIXED
+        const requestedDiscount = Number(coupon.discountValue) || 0;
+        const appliedDiscount = Math.min(requestedDiscount, maxDiscount);
+        const finalAmount = baseAmount - appliedDiscount;
+
+        if (appliedDiscount <= 0) {
+            return { finalAmount };
+        }
+
+        return {
+            finalAmount: this.ensureMinimumAmount(finalAmount, minCharge),
+            asaasDiscount: {
+                value: Number(appliedDiscount.toFixed(2)),
+                type: "FIXED",
+            },
+        };
+    }
+
+    // ---------------------------------------------------------------------
     // Pagamento avulso (serviços individuais)
     // ---------------------------------------------------------------------
 
@@ -291,10 +452,19 @@ export class PaymentService {
             data.washServices,
         );
 
-        const amount = services.reduce(
+        const baseAmount = services.reduce(
             (total, service) => total + service.price,
             0,
         );
+
+        const pricing = this.applyCouponWithMinimumCharge(
+            baseAmount,
+            coupon,
+            PaymentService.MINIMUM_CHARGE_AMOUNT,
+        );
+
+        // Fase 3: garante sempre > 0 (para constraint)
+        const amount = this.ensureMinimumAmount(pricing.finalAmount);
 
         const billingType =
             paymentType === "pix"
@@ -343,11 +513,17 @@ export class PaymentService {
         // -----------------------------------------------------------------
         // CORREÇÃO CRÍTICA:
         // Para PIX, NÃO enviar creditCard nem creditCardHolderInfo ao ASAAS.
+        // + REGRA CRÍTICA: desconto capado para nunca zerar cobrança.
+        // + FASE 4: modifiers prontos (discount/fine/interest).
         // -----------------------------------------------------------------
-        const asaasPaymentPayload: any = {
+        const modifiers = this.buildAsaasBillingModifiers({
+            discount: pricing.asaasDiscount,
+        });
+
+        const asaasPaymentPayload: AsaasCreatePaymentPayload = {
             billingType,
             dueDate: new Date().toISOString().split("T")[0],
-            value: amount,
+            value: baseAmount,
             customer: asaasCustomer.id,
             description: `Pagamento serviços avulsos: ${services
                 .map((s) => s.name)
@@ -356,17 +532,12 @@ export class PaymentService {
                 userId,
                 couponId: coupon?.id,
             }),
-            discount: !coupon
-                ? undefined
-                : {
-                    value: coupon.discountValue,
-                    type: coupon.discountType,
-                },
+            ...modifiers,
         };
 
         if (billingType === ASAASPaymentBillingTypeEnum.CREDIT_CARD) {
-            asaasPaymentPayload.creditCard = creditCard;
-            asaasPaymentPayload.creditCardHolderInfo = creditCardHolderInfo;
+            (asaasPaymentPayload as any).creditCard = creditCard;
+            (asaasPaymentPayload as any).creditCardHolderInfo = creditCardHolderInfo;
         }
 
         const asaasPayment = await asaasCreatePayment(asaasPaymentPayload);
@@ -391,7 +562,7 @@ export class PaymentService {
         const payment = await this.paymentRepository.create({
             id: 0,
             userId,
-            amount,
+            amount, // valor final (nunca 0)
             paymentMethodId: billingType.toString(),
             status: internalStatusFromAsaas,
             couponId: coupon?.id ?? null,
@@ -585,56 +756,22 @@ export class PaymentService {
 
         console.log("[subscribeToPlan] Criando assinatura em formato de PACOTE...");
 
-        const is100PercentDiscount =
-            coupon?.discountType === "PERCENTAGE"
-                ? coupon.discountValue === 100
-                : (coupon?.discountValue ?? 0) >= plan.price;
-
         const timeZoneOffset = data.timeZoneOffset ?? -180;
         const dateWithTimeZone = new Date();
         dateWithTimeZone.setMinutes(
             dateWithTimeZone.getMinutes() + timeZoneOffset,
         );
 
-        if (is100PercentDiscount) {
-            const expiresAt = this.calculatePlanExpiration(plan, dateWithTimeZone);
-
-            const subscription = await this.subscriptionRepository.create(
-                new Subscription({
-                    userId: loggedUser.id,
-                    planId: plan.id,
-                    planType: plan.periodicityType,
-                    amount: plan.price,
-                    isActive: true,
-                    startDate: dateWithTimeZone,
-                    carId: data.carId,
-                    expiresAt,
-                    paymentMethod: billingPaymentType,
-                    couponId: coupon?.id ?? null,
-                    subscriptionStatus: "ACTIVE",
-                    endDate: null,
-                }),
-            );
-
-            const payment = await this.paymentRepository.create({
-                id: 0,
-                userId,
-                planId: plan.id,
-                amount: 0,
-                status: "PAID",
-                installments: null,
-                paymentDate: dateWithTimeZone,
-                createdAt: dateWithTimeZone,
-                updatedAt: dateWithTimeZone,
-                paymentIdAsaas: "Cupom cobriu o custo",
-                couponId: coupon?.id ?? null,
-                pixQrCode: null,
-                pixPayload: null,
-                paymentMethodId: billingPaymentType.toString(),
-            });
-
-            return { subscription, payment };
-        }
+        // -----------------------------------------------------------------
+        // REGRA CRÍTICA:
+        // Cupom NUNCA pode gerar pagamento 0 nem ativação direta.
+        // Aplicamos desconto capado (mínimo a pagar = 1) e SEMPRE seguimos fluxo ASAAS.
+        // -----------------------------------------------------------------
+        const planPricing = this.applyCouponWithMinimumCharge(
+            plan.price,
+            coupon,
+            PaymentService.MINIMUM_CHARGE_AMOUNT,
+        );
 
         if (isClosedPackagePlan) {
             console.log(
@@ -673,8 +810,14 @@ export class PaymentService {
             // -----------------------------------------------------------------
             // CORREÇÃO CRÍTICA:
             // Para PIX, NÃO enviar creditCard nem creditCardHolderInfo ao ASAAS.
+            // + desconto capado para nunca zerar cobrança.
+            // + FASE 4: modifiers prontos.
             // -----------------------------------------------------------------
-            const asaasPaymentPayload: any = {
+            const modifiers = this.buildAsaasBillingModifiers({
+                discount: planPricing.asaasDiscount,
+            });
+
+            const asaasPaymentPayload: AsaasCreatePaymentPayload = {
                 billingType: billingPaymentType,
                 dueDate: dateWithTimeZone.toISOString().split("T")[0],
                 value: plan.price,
@@ -698,17 +841,12 @@ export class PaymentService {
                     planId: plan.id,
                     subId: subscription.id,
                 }),
-                discount: !coupon
-                    ? undefined
-                    : {
-                        value: coupon.discountValue,
-                        type: coupon.discountType,
-                    },
+                ...modifiers,
             };
 
             if (billingPaymentType === ASAASPaymentBillingTypeEnum.CREDIT_CARD) {
-                asaasPaymentPayload.creditCard = creditCard;
-                asaasPaymentPayload.creditCardHolderInfo = creditCardHolderInfo;
+                (asaasPaymentPayload as any).creditCard = creditCard;
+                (asaasPaymentPayload as any).creditCardHolderInfo = creditCardHolderInfo;
             }
 
             const asaasPayment = await asaasCreatePayment(asaasPaymentPayload);
@@ -735,11 +873,17 @@ export class PaymentService {
                 console.log("[subscribeToPlan] QR code PIX recuperado.");
             }
 
+            // Fase 3: garante persistência > 0
+            const safeFinalAmount = this.ensureMinimumAmount(
+                planPricing.finalAmount,
+                PaymentService.MINIMUM_CHARGE_AMOUNT,
+            );
+
             const payment = await this.paymentRepository.create({
                 id: 0,
                 userId,
                 planId: plan.id,
-                amount: plan.price,
+                amount: safeFinalAmount, // valor final (nunca 0)
                 status: finalStatus,
                 installments:
                     plan.periodicityType !== PeriodicityType.MONTH
@@ -1266,7 +1410,7 @@ export class PaymentService {
             userId,
             planId: plan.id,
             planType: plan.periodicityType,
-            amount: lastPaidPayment.amount,
+            amount: this.ensureMinimumAmount(lastPaidPayment.amount),
             isActive,
             startDate: paymentDate,
             carId,
@@ -1389,10 +1533,23 @@ export class PaymentService {
             const localSubscription =
                 this.hydrateSubscription(localSubscriptionRaw);
 
+            // Desconto capado para nunca zerar cobrança
+            const planPricing = this.applyCouponWithMinimumCharge(
+                plan.price,
+                coupon,
+                PaymentService.MINIMUM_CHARGE_AMOUNT,
+            );
+
             // -----------------------------------------------------------------
             // CORREÇÃO CRÍTICA:
             // Para PIX, NÃO enviar creditCard nem creditCardHolderInfo ao ASAAS.
+            // + desconto capado (mínimo a pagar).
+            // + FASE 4: modifiers prontos.
             // -----------------------------------------------------------------
+            const modifiers = this.buildAsaasBillingModifiers({
+                discount: planPricing.asaasDiscount,
+            });
+
             const payload: ASAASCreateSubscriptionDTO = {
                 customer: customerId,
                 nextDueDate: startDate.toISOString().split("T")[0],
@@ -1406,13 +1563,8 @@ export class PaymentService {
                     couponId: coupon?.id,
                     subId: localSubscription.id,
                 }),
-                discount: !coupon
-                    ? undefined
-                    : {
-                        value: coupon.discountValue,
-                        type: coupon.discountType,
-                    },
-            };
+                ...modifiers,
+            } as ASAASCreateSubscriptionDTO;
 
             if (billingType === ASAASSubscriptionBillingTypeEnum.CREDIT_CARD) {
                 (payload as any).creditCard = creditCard;
@@ -1480,12 +1632,18 @@ export class PaymentService {
                 firstPaymentAsaas.status as ASAASPaymentStatusEnum,
             );
 
+            // Fase 3: garante persistência > 0
+            const safeFinalAmount = this.ensureMinimumAmount(
+                planPricing.finalAmount,
+                PaymentService.MINIMUM_CHARGE_AMOUNT,
+            );
+
             const dbPayment = await this.paymentRepository.create({
                 id: 0,
                 userId: data.userId,
                 planId: plan.id,
                 couponId: coupon?.id ?? null,
-                amount: plan.price,
+                amount: safeFinalAmount, // valor final (nunca 0)
                 status: internalStatus,
                 paymentMethodId: billingType.toString(),
                 paymentIdAsaas: firstPaymentAsaas.id,
@@ -1730,7 +1888,14 @@ export class PaymentService {
                 return { status: 200, message: "ID de pagamento não encontrado" };
             }
 
-            const amount = Number(body.payment.value) || 0;
+            // -----------------------------------------------------------------
+            // FASE 3: garante nunca persistir amount <= 0 (constraint)
+            // -----------------------------------------------------------------
+            const rawAmount = Number(body.payment.value) || 0;
+            const amount = this.ensureMinimumAmount(
+                rawAmount,
+                PaymentService.MINIMUM_CHARGE_AMOUNT,
+            );
 
             const paymentDate =
                 body.payment.paymentDate !== undefined &&
@@ -1765,12 +1930,6 @@ export class PaymentService {
                         parseError,
                     );
                 }
-                await this.referralBonusService.generateOnFirstPaidSubscription({
-                    payerId: userId as number,
-                    subscriptionId: subId as number,
-                });
-
-
             }
 
             console.log(
@@ -1918,7 +2077,8 @@ export class PaymentService {
                                 this.hydrateSubscription(localSubByInstallmentRaw);
 
                             userId = userId ?? localSubByInstallment.userId;
-                            planId = planId ?? (localSubByInstallment.planId ?? undefined);
+                            planId =
+                                planId ?? (localSubByInstallment.planId ?? undefined);
                             subId = subId ?? localSubByInstallment.id;
                         }
                     }
@@ -2019,14 +2179,19 @@ export class PaymentService {
                 paymentMethodId,
             });
 
+            // Guardamos o ID local do payment (necessário para bônus recorrente)
+            let savedPaymentId: number | undefined;
+
             if (existingPayment) {
                 await this.paymentRepository.update(
                     { id: existingPayment.id },
                     newPayment,
                     true,
                 );
+                savedPaymentId = existingPayment.id;
             } else {
-                await this.paymentRepository.create(newPayment);
+                const created = await this.paymentRepository.create(newPayment);
+                savedPaymentId = created?.id;
             }
 
             // Atualiza assinatura associada quando houver vínculo
@@ -2046,6 +2211,9 @@ export class PaymentService {
                 }
 
                 if (subscription) {
+                    // Garante que subId fique coerente para o bônus UNIQUE
+                    subId = subId ?? subscription.id;
+
                     await this.updateSubscriptionValidityFromPayment(
                         subscription,
                         paymentDate,
@@ -2064,11 +2232,61 @@ export class PaymentService {
                 const subscription = subRaw ? this.hydrateSubscription(subRaw) : null;
 
                 if (subscription) {
+                    // Garante que subId fique coerente para o bônus UNIQUE
+                    subId = subId ?? subscription.id;
+
                     await this.updateSubscriptionValidityFromPayment(
                         subscription,
                         paymentDate,
                         newStatus,
                     );
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // BÔNUS DE INDICAÇÃO (AJUSTES - TÓPICO 1):
+            // - Disparar APENAS quando newStatus === "PAID".
+            // - Disparar APENAS se for pagamento de plano (planId != null).
+            // - UNIQUE exige subId válido (assinatura local).
+            // - Disparar APENAS após resolver userId/subId por todos os fallbacks.
+            // - Tolerar idempotência (retries do ASAAS) sem quebrar o webhook.
+            // -----------------------------------------------------------------
+            const isPlanPayment = normalizedPlanId !== null;
+
+            if (newStatus === "PAID" && isPlanPayment) {
+                // UNIQUE (primeiro PAID da assinatura)
+                if (subId !== undefined && subId !== null) {
+                    try {
+                        await this.referralBonusService.generateUniqueOnFirstPaidSubscription(
+                            {
+                                payerId: ensuredUserId,
+                                subscriptionId: subId,
+                                paymentId: savedPaymentId,
+                            },
+                        );
+                    } catch (bonusError) {
+                        console.warn(
+                            "[handlePaymentWebhook] Bônus UNIQUE falhou (provável idempotência/duplicidade). Ignorando para não quebrar webhook.",
+                            bonusError,
+                        );
+                    }
+                }
+
+                // RECURRENT (todo PAID por competência)
+                if (savedPaymentId !== undefined && savedPaymentId !== null) {
+                    try {
+                        await this.referralBonusService.generateRecurrentOnPaidPayment({
+                            payerId: ensuredUserId,
+                            paymentId: savedPaymentId,
+                            paymentDate,
+                            timeZoneOffsetMinutes: -180,
+                        });
+                    } catch (bonusError) {
+                        console.warn(
+                            "[handlePaymentWebhook] Bônus RECURRENT falhou (provável idempotência/duplicidade). Ignorando para não quebrar webhook.",
+                            bonusError,
+                        );
+                    }
                 }
             }
 

@@ -16,12 +16,6 @@ datasource db {
 model User {
   id Int @id @default(autoincrement())
 
-  /// Código de indicação (link/cupom).
-  /// Recomenda-se:
-  /// - manter nullable na 1ª migração (base existente)
-  /// - backfill em todos os users antigos
-  /// - garantir geração no cadastro (Fase 2)
-  /// - (opcional) futuramente tornar obrigatório, se desejar
   referralCode String? @unique
 
   name            String
@@ -38,30 +32,19 @@ model User {
   deletedAt       DateTime?
   status          UserStatus @default(ACTIVE)
 
-  // ------------------------------------------------------------
-  // INDICAÇÃO (LEGADO/ACESSO RÁPIDO): vínculo direto no User
-  // ------------------------------------------------------------
-  referrerId Int? // ID do usuário que indicou este usuário (nível 1)
-  referrals  User[] @relation("UserReferrals") // Usuários que este usuário indicou
+  referrerId Int?
+  referrals  User[] @relation("UserReferrals")
   referrer   User?  @relation("UserReferrals", fields: [referrerId], references: [id])
 
-  // ------------------------------------------------------------
-  // INDICAÇÃO (AUDITORIA / ANTIFRAUDE / ORIGEM): tabela dedicada
-  // ------------------------------------------------------------
   referralsSent    UserReferral[] @relation("UserReferralReferrer")
   referralReceived UserReferral?  @relation("UserReferralReferred")
 
-  // Bônus recebidos por este usuário (receiver)
-  referralBonuses ReferralBonus[] @relation("ReceiverToBonus")
-
-  // Bônus pagos/gerados por este usuário (payer) — Fase 3 (níveis 1/2/3)
+  referralBonuses       ReferralBonus[] @relation("ReceiverToBonus")
   referralBonusesPaidBy ReferralBonus[] @relation("PayerToBonus")
 
-  // RELAÇÕES DE CASHBACK
   cashbackWallets      CashbackWallet[]
   cashbackTransactions CashbackTransaction[]
 
-  // RELAÇÕES OPERACIONAIS EXISTENTES
   requestLogs                RequestLog[]
   webhookLogs                WebhookLog[]
   cars                       Car[]
@@ -76,15 +59,12 @@ model User {
   @@schema("public")
 }
 
-/// Registro formal da associação Indicador -> Indicado.
-/// Ajuda a cumprir contrato (origem/link/cupom/landing) + trilha antifraude e auditoria.
 model UserReferral {
   id         Int            @id @default(autoincrement())
   referrerId Int
   referredId Int            @unique
   source     ReferralSource @default(UNKNOWN)
 
-  // antifraude / auditoria (mínimo viável)
   deviceId  String?
   ip        String?
   userAgent String?
@@ -100,11 +80,10 @@ model UserReferral {
   @@schema("public")
 }
 
-// NOVO MODELO: CARTEIRA DE CASHBACK (INTERNO E ALLOYAL)
 model CashbackWallet {
   id        Int        @id @default(autoincrement())
   userId    Int
-  type      WalletType @default(INTERNAL) // INTERNO ou ALLOYAL
+  type      WalletType @default(INTERNAL)
   balance   Float      @default(0.0)
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
@@ -115,18 +94,14 @@ model CashbackWallet {
   @@schema("public")
 }
 
-// NOVO MODELO: REGISTRO DE TRANSAÇÕES DE CASHBACK
 model CashbackTransaction {
   id        Int               @id @default(autoincrement())
   userId    Int
-  type      TransactionType // EARNED (ganho) ou USED (usado)
-  source    TransactionSource // INDICATION, PARTNER_LOCAL, ALLOYAL, SUBSCRIPTION_DEBIT, QR_REDEMPTION
+  type      TransactionType
+  source    TransactionSource
   amount    Float
-  relatedId String? // paymentIdAsaas, subscriptionId, partnerId, etc.
+  relatedId String?
 
-  /// Idempotência (Fase 3/4):
-  /// - garante que um mesmo “evento” não gere 2 transações
-  /// Ex: "BONUS:payment:123:level:1:receiver:9"
   eventKey String? @unique
 
   meta Json?
@@ -140,31 +115,22 @@ model CashbackTransaction {
   @@schema("public")
 }
 
-// NOVO MODELO: BÔNUS DE INDICAÇÃO
 model ReferralBonus {
   id Int @id @default(autoincrement())
 
-  receiverId    Int // Quem recebe o bônus
-  payerId       Int // Usuário que gerou a assinatura/pagamento/lavagem
-  level         Int // 1, 2, ou 3
-  type          BonusType // UNIQUE ou RECURRENT
+  receiverId    Int
+  payerId       Int
+  level         Int
+  type          BonusType
   amount        Float
   paymentStatus PaymentStatus @default(PENDING)
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
-  /// Idempotência (Fase 3):
-  /// - impede duplicidade do bônus em retries/webhooks/cron
-  /// Ex:
-  ///   UNIQUE:payment:{paymentId}:level:{level}:receiver:{receiverId}
-  ///   RECURRENT:{YYYY-MM}:payer:{payerId}:level:{level}:receiver:{receiverId}
   eventKey String @unique
 
-  /// Competência para bônus recorrente (Fase 3).
-  /// Formato recomendado: "YYYY-MM" (ex: "2025-12")
   competenceYearMonth String?
 
-  /// Opcional: vínculo direto a um Payment interno (quando o bônus vier de um pagamento).
   paymentId Int?
   payment   Payment? @relation(fields: [paymentId], references: [id])
 
@@ -179,10 +145,6 @@ model ReferralBonus {
   @@index([paymentId])
   @@schema("public")
 }
-
-// -----------------------------------------------------------------------
-// MODELOS EXISTENTES CORRIGIDOS/EXPANDIDOS
-// -----------------------------------------------------------------------
 
 model Plan {
   id              Int             @id @default(autoincrement())
@@ -217,33 +179,19 @@ model Payment {
   status             PaymentStatus @default(PENDING)
   paymentMethodId    String?
   planId             Int?
-  paymentIdAsaas     String?
+  paymentIdAsaas     String?       @unique
   couponId           Int?
   pixPayload         String?
   pixQrCode          String?
   installments       Int?
   cashbackUsedAmount Float?
 
-  // ------------------------------------------------------------
-  // FASE 4: FLOAT / LIQUIDAÇÃO
-  // ------------------------------------------------------------
-  /// Canal principal de pagamento (PIX/CARD/BOLETO/etc)
-  channel PaymentChannel @default(UNKNOWN)
-
-  /// Momento em que o pagamento foi confirmado como PAID (webhook/retorno gateway)
-  paidAt DateTime?
-
-  /// Data prevista de liquidação (quando aplicável)
+  channel              PaymentChannel @default(UNKNOWN)
+  paidAt               DateTime?
   expectedSettlementAt DateTime?
-
-  /// Data real de liquidação (quando o dinheiro “caiu” / foi repassado)
-  settledAt DateTime?
-
-  /// Taxa cobrada pelo gateway (quando aplicável)
-  feeAmount Float?
-
-  /// Valor líquido após taxas (quando aplicável)
-  netAmount Float?
+  settledAt            DateTime?
+  feeAmount            Float?
+  netAmount            Float?
 
   webhookLogs                WebhookLog[]
   individualServicePurchases IndividualServicePurchase[]
@@ -251,7 +199,6 @@ model Payment {
   plan                       Plan?                       @relation(fields: [planId], references: [id])
   user                       User                        @relation(fields: [userId], references: [id])
 
-  /// Bônus que referenciam este pagamento (Fase 3)
   referralBonuses ReferralBonus[]
 
   @@index([userId])
@@ -384,7 +331,7 @@ model Subscription {
   planType            String
   paymentMethod       String?
   planId              Int?
-  subscriptionIdAsaas String?
+  subscriptionIdAsaas String?            @unique
   installmentIdAsaas  String?
   couponId            Int?
 
@@ -393,6 +340,7 @@ model Subscription {
   plan   Plan?   @relation(fields: [planId], references: [id])
   user   User    @relation(fields: [userId], references: [id])
 
+  @@index([installmentIdAsaas])
   @@schema("public")
 }
 
