@@ -106,12 +106,16 @@ model CashbackTransaction {
 
   meta Json?
 
+  // ✅ NOVO: expiração (ex.: welcome bonus válido por 7 dias)
+  expiresAt DateTime?
+
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
   @@index([userId])
   @@index([createdAt])
+  @@index([expiresAt])
   @@schema("public")
 }
 
@@ -143,6 +147,19 @@ model ReferralBonus {
   @@index([paymentStatus])
   @@index([competenceYearMonth])
   @@index([paymentId])
+  @@schema("public")
+}
+
+// ✅ NOVO: Configuração de bônus por nível do MMN (até 9 níveis)
+// (evita hardcode e permite ajuste sem deploy)
+model ReferralLevelConfig {
+  id        Int      @id @default(autoincrement())
+  level     Int      @unique
+  amount    Float
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   @@schema("public")
 }
 
@@ -193,6 +210,9 @@ model Payment {
   feeAmount            Float?
   netAmount            Float?
 
+  // ✅ NOVO: vencimento (base para “inadimplente” quando status=PENDING e dueAt < hoje)
+  dueAt DateTime?
+
   webhookLogs                WebhookLog[]
   individualServicePurchases IndividualServicePurchase[]
   coupon                     Coupon?                     @relation(fields: [couponId], references: [id])
@@ -206,6 +226,7 @@ model Payment {
   @@index([paidAt])
   @@index([settledAt])
   @@index([status, paidAt, settledAt])
+  @@index([dueAt])
   @@schema("public")
 }
 
@@ -596,6 +617,7 @@ enum TransactionType {
 }
 
 enum TransactionSource {
+  WELCOME_BONUS
   INDICATION
   PARTNER_LOCAL
   ALLOYAL

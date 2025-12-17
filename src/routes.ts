@@ -23,6 +23,9 @@ import asaasRoutes from "./assas/asaas.routes";
 // ✅ Referrals (Fase 1)
 import referralsRoutes from "./modules/referrals/routes";
 
+// ✅ Cashback (Fase 4)
+import cashbackRoutes from "./modules/cashback/routes";
+
 const routes = Router();
 
 // Arquivos estáticos de upload
@@ -47,6 +50,9 @@ routes.use("/coupons", couponRoutes);
 
 // ✅ Monta /referrals/*
 routes.use("/referrals", referralsRoutes);
+
+// ✅ Monta /cashback/*
+routes.use("/cashback", cashbackRoutes);
 
 // Rotas de integração/sincronização com Asaas
 routes.use("/asaas", asaasRoutes);

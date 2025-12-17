@@ -1,38 +1,49 @@
 import type { WalletType } from "@prisma/client";
 
+export interface CashbackWalletProps {
+    id: number;
+    userId: number;
+    type: WalletType;
+    balance: number;
+    createdAt: Date;
+    updatedAt: Date;
+}
+
 export class CashbackWallet {
-    constructor(
-        public readonly props: {
-            id: number;
-            userId: number;
-            type: WalletType;
-            balance: number;
-            createdAt: Date;
-            updatedAt: Date;
-        },
-    ) {}
+    public readonly id: number;
+    public readonly userId: number;
+    public readonly type: WalletType;
+    public readonly balance: number;
+    public readonly createdAt: Date;
+    public readonly updatedAt: Date;
 
-    get id() {
-        return this.props.id;
+    constructor(props: CashbackWalletProps) {
+        if (!props) throw new Error("CashbackWalletProps é obrigatório.");
+
+        if (!Number.isInteger(props.id) || props.id <= 0) {
+            throw new Error("id inválido.");
+        }
+
+        if (!Number.isInteger(props.userId) || props.userId <= 0) {
+            throw new Error("userId inválido.");
+        }
+
+        this.id = props.id;
+        this.userId = props.userId;
+        this.type = props.type;
+        this.balance = props.balance;
+        this.createdAt = props.createdAt;
+        this.updatedAt = props.updatedAt;
     }
 
-    get userId() {
-        return this.props.userId;
-    }
-
-    get type() {
-        return this.props.type;
-    }
-
-    get balance() {
-        return this.props.balance;
-    }
-
-    credit(amount: number) {
-        this.props.balance += amount;
-    }
-
-    debit(amount: number) {
-        this.props.balance -= amount;
+    public toJSON() {
+        return {
+            id: this.id,
+            userId: this.userId,
+            type: this.type,
+            balance: this.balance,
+            createdAt: this.createdAt,
+            updatedAt: this.updatedAt,
+        };
     }
 }

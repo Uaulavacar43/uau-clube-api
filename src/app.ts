@@ -8,50 +8,33 @@ import routes from "./routes";
 
 const app = express();
 
-// Necessário quando atrás de proxy reverso (NGINX / Cloudflare)
 app.set("trust proxy", 1);
 
 // ---------------------------------------------------
-// CORS — Flutter Web / Ionic / Web
+// CORS — DEFINITIVO
 // ---------------------------------------------------
 
 const allowedOrigins = [
-    // Flutter Web (porta dinâmica)
-    /^http:\/\/localhost:\d+$/,
-
-    // Ionic
-    "http://localhost:8100",
-
-    // Web dev (se existir)
-    "http://localhost:5173",
-
-    // Produção
+    /^http:\/\/localhost:\d+$/,        // Flutter Web dev
+    "http://localhost:8100",           // Ionic
+    "http://localhost:5173",           // Vite (se existir)
+    /^https:\/\/.*\.web\.app$/,        // Firebase Hosting
     "https://cashback.uauclube.com",
-    "https://app-uauclube.com",
+    "https://app.uauclube.com",
 ];
 
 app.use(
     cors({
         origin(origin, callback) {
-            // Mobile / Flutter nativo / Postman não enviam Origin
-            if (!origin) {
-                return callback(null, true);
-            }
+            // Mobile / Postman / server-to-server
+            if (!origin) return callback(null, true);
 
-            const isAllowed = allowedOrigins.some((allowed) => {
-                if (allowed instanceof RegExp) {
-                    return allowed.test(origin);
-                }
-                return allowed === origin;
-            });
-
-            if (isAllowed) {
-                return callback(null, true);
-            }
-
-            return callback(
-                new Error(`CORS blocked for origin: ${origin}`)
+            const allowed = allowedOrigins.some((o) =>
+                o instanceof RegExp ? o.test(origin) : o === origin
             );
+
+            // ⚠️ NÃO lance erro aqui
+            return callback(null, allowed);
         },
         credentials: true,
         methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -61,13 +44,10 @@ app.use(
             "Accept",
             "X-Requested-With",
         ],
-    }),
+    })
 );
 
-// ---------------------------------------------------
-// IMPORTANTE: liberar preflight ANTES das rotas
-// ---------------------------------------------------
-
+// ✅ Preflight SEMPRE liberado
 app.options("*", cors());
 
 // ---------------------------------------------------
@@ -83,7 +63,7 @@ configureHandlebars(app);
 // Rotas
 app.use("/", routes);
 
-// Error handler (sempre por último)
+// Error handler (por último)
 app.use(errorHandler);
 
 export default app;

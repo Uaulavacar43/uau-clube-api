@@ -3,30 +3,24 @@ import type { ICashbackWalletRepository } from "../interfaces/ICashbackWalletRep
 import prisma from "../../config/dbConfig";
 import { WalletType } from "@prisma/client";
 
-export class PrismaCashbackWalletRepository
-    implements ICashbackWalletRepository
-{
+export class PrismaCashbackWalletRepository implements ICashbackWalletRepository {
     private readonly INTERNAL_TYPE: WalletType = WalletType.INTERNAL;
 
     async getOrCreateInternalWallet(userId: number): Promise<CashbackWallet> {
-        let wallet = await prisma.cashbackWallet.findUnique({
+        const wallet = await prisma.cashbackWallet.upsert({
             where: {
                 userId_type: {
                     userId,
                     type: this.INTERNAL_TYPE,
                 },
             },
+            create: {
+                userId,
+                type: this.INTERNAL_TYPE,
+                balance: 0,
+            },
+            update: {},
         });
-
-        if (!wallet) {
-            wallet = await prisma.cashbackWallet.create({
-                data: {
-                    userId,
-                    type: this.INTERNAL_TYPE,
-                    balance: 0,
-                },
-            });
-        }
 
         return new CashbackWallet(wallet);
     }
@@ -45,20 +39,20 @@ export class PrismaCashbackWalletRepository
     }
 
     async incrementBalance(walletId: number, amount: number): Promise<void> {
+        if (amount <= 0) return;
+
         await prisma.cashbackWallet.update({
             where: { id: walletId },
-            data: {
-                balance: { increment: amount },
-            },
+            data: { balance: { increment: amount } },
         });
     }
 
     async decrementBalance(walletId: number, amount: number): Promise<void> {
+        if (amount <= 0) return;
+
         await prisma.cashbackWallet.update({
             where: { id: walletId },
-            data: {
-                balance: { decrement: amount },
-            },
+            data: { balance: { decrement: amount } },
         });
     }
 }

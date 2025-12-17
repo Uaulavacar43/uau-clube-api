@@ -15,11 +15,7 @@ import type { IUserCarRepository } from "../../repositories/interfaces/IUserCarR
 import type { IUserRepository } from "../../repositories/interfaces/IUserRepository";
 import type { IWashServiceRepository } from "../../repositories/interfaces/IWashServiceRepository";
 import prisma from "../../config/dbConfig";
-import {
-    TransactionSource,
-    TransactionType,
-    WalletType,
-} from "@prisma/client";
+import { TransactionSource, TransactionType, WalletType } from "@prisma/client";
 import { asaasGetOrCreateCustomerByCpfCnpj } from "../../utils/asaas/asaasCustomer";
 import { ASAAS_EVENT_STATUS_MAP } from "../../utils/asaas/asaasEventMap";
 import {
@@ -102,7 +98,8 @@ type CouponPricingResult = {
  * FASE 4 (Cashback):
  * - Permitir uso de cashback para reduzir o valor cobrado no ASAAS (via discount FIXED).
  * - Persistir o cashback usado em Payment.cashbackUsedAmount.
- * - Debitar do wallet APENAS quando o pagamento for PAID (webhook), de forma idempotente.
+ * - Débito do wallet APENAS quando o pagamento for PAID (webhook), de forma idempotente.
+ * - Aplicar regra de 50% do TOTAL do pagamento (após cupom) e respeitar expiração (expiresAt).
  * ---------------------------------------------------------------------
  */
 export class PaymentService {
@@ -132,6 +129,24 @@ export class PaymentService {
         }
 
         const d = new Date(value as any);
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+
+    private isoDateString(date: Date): string {
+        return new Date(date.getTime()).toISOString().split("T")[0];
+    }
+
+    private parseIsoDateToDate(value: unknown): Date | null {
+        if (!value) return null;
+        if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+        if (typeof value !== "string") return null;
+
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+
+        // ASAAS geralmente manda YYYY-MM-DD
+        // new Date("YYYY-MM-DD") interpreta como UTC 00:00:00
+        const d = new Date(trimmed);
         return Number.isNaN(d.getTime()) ? null : d;
     }
 
@@ -267,14 +282,64 @@ export class PaymentService {
     }
 
     // ---------------------------------------------------------------------
-    // FASE 4: Helpers de Cashback (leitura, cálculo e débito idempotente)
+    // FASE 4: Helpers de Cashback (saldo disponível com expiração + regra 50%)
     // ---------------------------------------------------------------------
 
-    private parseCashbackAmount(input: unknown): number {
-        const n = Number(input);
+    private normalizeMoney(value: unknown): number {
+        const n = Number(value);
         if (!Number.isFinite(n)) return 0;
         if (n <= 0) return 0;
         return Number(n.toFixed(2));
+    }
+
+    private parseCashbackAmount(input: unknown): number {
+        return this.normalizeMoney(input);
+    }
+
+    private async computeCashbackAvailability(userId: number, now: Date): Promise<{
+        earnedValid: number;
+        earnedExpired: number;
+        usedTotal: number;
+        availableBalance: number;
+    }> {
+        const rows = await prisma.cashbackTransaction.findMany({
+            where: { userId },
+            select: {
+                type: true,
+                amount: true,
+                expiresAt: true,
+            },
+        });
+
+        let earnedValid = 0;
+        let earnedExpired = 0;
+        let usedTotal = 0;
+
+        for (const tx of rows) {
+            const amount = Number(tx.amount ?? 0);
+
+            if (tx.type === TransactionType.EARNED) {
+                const expiresAt = tx.expiresAt ? new Date(tx.expiresAt) : null;
+                const isExpired = expiresAt ? expiresAt.getTime() <= now.getTime() : false;
+
+                if (isExpired) earnedExpired += amount;
+                else earnedValid += amount;
+            }
+
+            if (tx.type === TransactionType.USED) {
+                usedTotal += amount;
+            }
+        }
+
+        const rawAvailable = earnedValid - usedTotal;
+        const availableBalance = rawAvailable < 0 ? 0 : Number(rawAvailable.toFixed(2));
+
+        return {
+            earnedValid: Number(earnedValid.toFixed(2)),
+            earnedExpired: Number(earnedExpired.toFixed(2)),
+            usedTotal: Number(usedTotal.toFixed(2)),
+            availableBalance,
+        };
     }
 
     private async getOrCreateInternalWalletByUserId(userId: number): Promise<{
@@ -312,72 +377,105 @@ export class PaymentService {
         };
     }
 
+    /**
+     * Regra de cashback aplicada NO MOMENTO DE CRIAÇÃO DA COBRANÇA:
+     * - não deixa o pagamento ficar abaixo do mínimo
+     * - limita cashback em 50% do total (após cupom)
+     * - usa saldo disponível real (earned válido - used), respeitando expiresAt
+     *
+     * Importante: aqui NÃO debita do wallet (apenas calcula e persiste em Payment.cashbackUsedAmount).
+     * O débito acontece no webhook quando PAID (idempotente).
+     */
     private async resolveCashbackUsageOrThrow(params: {
         userId: number;
         requestedCashback: number;
-        amountAfterCoupon: number;
+        amountAfterCoupon: number; // total após cupom, antes do cashback
         minimumCharge: number;
     }): Promise<{
         cashbackUsed: number;
         amountAfterCashback: number;
         wallet: { id: number; balance: number };
+        availableBalance: number;
     }> {
         const requested = this.parseCashbackAmount(params.requestedCashback);
 
-        const amountAfterCoupon = this.ensureMinimumAmount(
-            params.amountAfterCoupon,
+        const minCharge = this.ensureMinimumAmount(
             params.minimumCharge,
+            PaymentService.MINIMUM_CHARGE_AMOUNT,
         );
+
+        const amountAfterCoupon = this.ensureMinimumAmount(params.amountAfterCoupon, minCharge);
 
         if (requested <= 0) {
             return {
                 cashbackUsed: 0,
                 amountAfterCashback: amountAfterCoupon,
                 wallet: { id: 0, balance: 0 },
+                availableBalance: 0,
             };
         }
 
         const wallet = await this.getOrCreateInternalWalletByUserId(params.userId);
 
-        if (wallet.balance <= 0) {
+        const now = new Date();
+        const availability = await this.computeCashbackAvailability(params.userId, now);
+
+        if (availability.availableBalance <= 0) {
             throw new AppError("Saldo de cashback indisponível", 400);
         }
 
-        const maxCashbackAllowed = Math.max(
-            0,
-            amountAfterCoupon - this.ensureMinimumAmount(params.minimumCharge),
-        );
+        // Regra 1: não pode reduzir abaixo do mínimo
+        const maxByMinCharge = Math.max(0, amountAfterCoupon - minCharge);
 
-        if (maxCashbackAllowed <= 0) {
+        // Regra 2: 50% do total (após cupom)
+        const maxByRule50 = Math.max(0, amountAfterCoupon * 0.5);
+
+        // Limite final
+        const maxAllowed = Math.min(maxByMinCharge, maxByRule50);
+
+        if (maxAllowed <= 0) {
             return {
                 cashbackUsed: 0,
                 amountAfterCashback: amountAfterCoupon,
                 wallet: { id: wallet.id, balance: wallet.balance },
+                availableBalance: availability.availableBalance,
             };
         }
 
-        const cashbackUsed = Math.min(wallet.balance, requested, maxCashbackAllowed);
+        const cashbackUsed = Math.min(
+            availability.availableBalance,
+            requested,
+            maxAllowed,
+        );
 
         if (cashbackUsed <= 0) {
             return {
                 cashbackUsed: 0,
                 amountAfterCashback: amountAfterCoupon,
                 wallet: { id: wallet.id, balance: wallet.balance },
+                availableBalance: availability.availableBalance,
             };
         }
 
         const amountAfterCashback = this.ensureMinimumAmount(
             amountAfterCoupon - cashbackUsed,
-            params.minimumCharge,
+            minCharge,
         );
 
         return {
             cashbackUsed: Number(cashbackUsed.toFixed(2)),
             amountAfterCashback,
             wallet: { id: wallet.id, balance: wallet.balance },
+            availableBalance: availability.availableBalance,
         };
     }
 
+    /**
+     * Débito idempotente no PAID:
+     * - Usa eventKey único por paymentIdAsaas
+     * - Verifica saldo disponível real (respeitando expiresAt)
+     * - Decrementa wallet e registra CashbackTransaction.USED
+     */
     private async debitCashbackIdempotentOnPaid(params: {
         userId: number;
         amount: number;
@@ -385,10 +483,10 @@ export class PaymentService {
         paymentIdLocal?: number | null;
         meta?: Record<string, any>;
     }): Promise<void> {
-        const amountToDebit = this.ensureMinimumAmount(params.amount);
+        const amountToDebit = this.parseCashbackAmount(params.amount);
         if (amountToDebit <= 0) return;
 
-        const eventKey = `PAYMENT:${params.paymentIdAsaas}`;
+        const eventKey = `CASHBACK_DEBIT:ASAAS_PAYMENT:${params.paymentIdAsaas}`;
 
         await prisma.$transaction(async (tx) => {
             const wallet = await tx.cashbackWallet.upsert({
@@ -419,11 +517,48 @@ export class PaymentService {
                 return;
             }
 
-            const currentBalance = Number(wallet.balance ?? 0);
+            const now = new Date();
 
-            if (currentBalance < amountToDebit) {
+            const userTxs = await tx.cashbackTransaction.findMany({
+                where: { userId: params.userId },
+                select: {
+                    type: true,
+                    amount: true,
+                    expiresAt: true,
+                },
+            });
+
+            let earnedValid = 0;
+            let usedTotal = 0;
+
+            for (const t of userTxs) {
+                const a = Number(t.amount ?? 0);
+
+                if (t.type === TransactionType.EARNED) {
+                    const expiresAt = t.expiresAt ? new Date(t.expiresAt) : null;
+                    const isExpired = expiresAt ? expiresAt.getTime() <= now.getTime() : false;
+                    if (!isExpired) earnedValid += a;
+                }
+
+                if (t.type === TransactionType.USED) {
+                    usedTotal += a;
+                }
+            }
+
+            const availableBalance = Math.max(0, earnedValid - usedTotal);
+
+            const walletBalance = Number(wallet.balance ?? 0);
+
+            if (availableBalance < amountToDebit) {
                 throw new AppError(
-                    "Saldo de cashback insuficiente para concluir o débito no pagamento confirmado",
+                    "Saldo de cashback insuficiente (saldo disponível real) para debitar no pagamento confirmado",
+                    409,
+                );
+            }
+
+            if (walletBalance < amountToDebit) {
+                throw new AppError(
+                    "Saldo de wallet insuficiente para debitar no pagamento confirmado",
                     409,
                 );
             }
@@ -450,6 +585,7 @@ export class PaymentService {
                         paymentIdAsaas: params.paymentIdAsaas,
                         ...(params.meta ?? {}),
                     },
+                    expiresAt: null,
                 },
             });
         });
@@ -569,7 +705,10 @@ export class PaymentService {
         if (base <= 0) return undefined;
 
         const totalDiscount = Number(
-            (Number(params.appliedCouponDiscountValue || 0) + Number(params.cashbackUsed || 0)).toFixed(2),
+            (
+                Number(params.appliedCouponDiscountValue || 0) +
+                Number(params.cashbackUsed || 0)
+            ).toFixed(2),
         );
 
         if (!Number.isFinite(totalDiscount) || totalDiscount <= 0) {
@@ -732,9 +871,12 @@ export class PaymentService {
             discount: combinedDiscount,
         });
 
+        const dueDateStr = this.isoDateString(new Date());
+        const dueAt = this.parseIsoDateToDate(dueDateStr) ?? new Date();
+
         const asaasPaymentPayload: AsaasCreatePaymentPayload = {
             billingType,
-            dueDate: new Date().toISOString().split("T")[0],
+            dueDate: dueDateStr,
             value: baseAmount,
             customer: asaasCustomer.id,
             description: `Pagamento serviços avulsos: ${services
@@ -744,6 +886,9 @@ export class PaymentService {
                 userId,
                 couponId: coupon?.id,
                 cashbackUsedAmount: cashbackPricing.cashbackUsed,
+                cashbackBaseAmount: pricing.finalAmount, // base p/ regra 50% (após cupom)
+                cashbackRequestedAmount: requestedCashback,
+                minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
             }),
             ...modifiers,
         };
@@ -780,6 +925,7 @@ export class PaymentService {
             status: internalStatusFromAsaas,
             couponId: coupon?.id ?? null,
             paymentDate: agora,
+            dueAt, // FASE 4: novo campo
             pixQrCode,
             pixPayload,
             createdAt: agora,
@@ -787,7 +933,8 @@ export class PaymentService {
             paymentIdAsaas: asaasPayment.id,
             planId: null,
             installments: null,
-            cashbackUsedAmount: cashbackPricing.cashbackUsed > 0 ? cashbackPricing.cashbackUsed : null,
+            cashbackUsedAmount:
+                cashbackPricing.cashbackUsed > 0 ? cashbackPricing.cashbackUsed : null,
         } as any);
 
         const individualPurchases: IndividualServicePurchase[] = [];
@@ -1040,7 +1187,7 @@ export class PaymentService {
 
             const asaasPaymentPayload: AsaasCreatePaymentPayload = {
                 billingType: billingPaymentType,
-                dueDate: dateWithTimeZone.toISOString().split("T")[0],
+                dueDate: this.isoDateString(dateWithTimeZone),
                 value: plan.price,
                 installmentCount:
                     plan.periodicityType !== PeriodicityType.MONTH &&
@@ -1062,6 +1209,9 @@ export class PaymentService {
                     planId: plan.id,
                     subId: subscription.id,
                     cashbackUsedAmount: cashbackPricing.cashbackUsed,
+                    cashbackBaseAmount: planCouponPricing.finalAmount,
+                    cashbackRequestedAmount: requestedCashback,
+                    minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
                 }),
                 ...modifiers,
             };
@@ -1111,6 +1261,7 @@ export class PaymentService {
                         ? (data as any)?.installments ?? null
                         : null,
                 paymentDate: dateWithTimeZone,
+                dueAt: this.parseIsoDateToDate(this.isoDateString(dateWithTimeZone)) ?? dateWithTimeZone,
                 createdAt: dateWithTimeZone,
                 updatedAt: dateWithTimeZone,
                 paymentIdAsaas: asaasPayment.id,
@@ -1118,7 +1269,8 @@ export class PaymentService {
                 pixQrCode,
                 pixPayload,
                 paymentMethodId: billingPaymentType.toString(),
-                cashbackUsedAmount: cashbackPricing.cashbackUsed > 0 ? cashbackPricing.cashbackUsed : null,
+                cashbackUsedAmount:
+                    cashbackPricing.cashbackUsed > 0 ? cashbackPricing.cashbackUsed : null,
             } as any);
 
             let createdSubscription: Subscription;
@@ -1757,7 +1909,7 @@ export class PaymentService {
 
             const payload: ASAASCreateSubscriptionDTO = {
                 customer: customerId,
-                nextDueDate: startDate.toISOString().split("T")[0],
+                nextDueDate: this.isoDateString(startDate),
                 value: plan.price,
                 billingType,
                 cycle,
@@ -1768,6 +1920,9 @@ export class PaymentService {
                     couponId: coupon?.id,
                     subId: localSubscription.id,
                     cashbackUsedAmount: cashbackPricing.cashbackUsed,
+                    cashbackBaseAmount: planCouponPricing.finalAmount,
+                    cashbackRequestedAmount: requestedCashback,
+                    minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
                 }),
                 ...modifiers,
             } as ASAASCreateSubscriptionDTO;
@@ -1853,12 +2008,14 @@ export class PaymentService {
                 paymentMethodId: billingType.toString(),
                 paymentIdAsaas: firstPaymentAsaas.id,
                 paymentDate: startDate,
+                dueAt: this.parseIsoDateToDate(this.isoDateString(startDate)) ?? startDate,
                 createdAt: startDate,
                 updatedAt: startDate,
                 pixQrCode,
                 pixPayload,
                 installments: null,
-                cashbackUsedAmount: cashbackPricing.cashbackUsed > 0 ? cashbackPricing.cashbackUsed : null,
+                cashbackUsedAmount:
+                    cashbackPricing.cashbackUsed > 0 ? cashbackPricing.cashbackUsed : null,
             } as any);
 
             if (internalStatus === "PAID") {
@@ -2098,11 +2255,17 @@ export class PaymentService {
                     ? new Date(body.payment.paymentDate)
                     : new Date();
 
+            const dueAtFromBody =
+                (body.payment as any)?.dueDate !== undefined && (body.payment as any)?.dueDate !== null
+                    ? this.parseIsoDateToDate((body.payment as any)?.dueDate) // pode ser YYYY-MM-DD
+                    : null;
+
             let userId: number | undefined;
             let planId: number | undefined;
             let couponId: number | undefined;
             let subId: number | undefined;
             let cashbackUsedAmount: number | undefined;
+            let cashbackBaseAmount: number | undefined;
 
             if (body.payment.externalReference) {
                 try {
@@ -2114,6 +2277,7 @@ export class PaymentService {
                         couponId?: number;
                         subId?: number;
                         cashbackUsedAmount?: number;
+                        cashbackBaseAmount?: number;
                     };
 
                     userId = externalReference.userId;
@@ -2121,6 +2285,7 @@ export class PaymentService {
                     couponId = externalReference.couponId;
                     subId = externalReference.subId;
                     cashbackUsedAmount = externalReference.cashbackUsedAmount;
+                    cashbackBaseAmount = externalReference.cashbackBaseAmount;
                 } catch (parseError) {
                     console.error(
                         "[handlePaymentWebhook] Erro ao fazer parse da externalReference:",
@@ -2130,7 +2295,7 @@ export class PaymentService {
             }
 
             console.log(
-                `[handlePaymentWebhook] userId inicial: ${userId}, planId inicial: ${planId}, couponId inicial: ${couponId}, subId inicial: ${subId}, cashbackUsedAmount inicial: ${cashbackUsedAmount}`,
+                `[handlePaymentWebhook] userId inicial: ${userId}, planId inicial: ${planId}, couponId inicial: ${couponId}, subId inicial: ${subId}, cashbackUsedAmount inicial: ${cashbackUsedAmount}, cashbackBaseAmount inicial: ${cashbackBaseAmount}`,
             );
 
             if ((!userId || !planId) && body.payment.subscription) {
@@ -2197,6 +2362,7 @@ export class PaymentService {
                         billingType?: string | null;
                         value?: number | string | null;
                         paymentDate?: string | null;
+                        dueDate?: string | null;
                     };
 
                     const asaasPaymentRaw = await asaasGetPayment(paymentAsaasId);
@@ -2217,13 +2383,17 @@ export class PaymentService {
                                 couponId?: number;
                                 subId?: number;
                                 cashbackUsedAmount?: number;
+                                cashbackBaseAmount?: number;
                             };
 
                             userId = userId ?? externalReference.userId;
                             planId = planId ?? externalReference.planId;
                             couponId = couponId ?? externalReference.couponId;
                             subId = subId ?? externalReference.subId;
-                            cashbackUsedAmount = cashbackUsedAmount ?? externalReference.cashbackUsedAmount;
+                            cashbackUsedAmount =
+                                cashbackUsedAmount ?? externalReference.cashbackUsedAmount;
+                            cashbackBaseAmount =
+                                cashbackBaseAmount ?? externalReference.cashbackBaseAmount;
                         } catch (parseError) {
                             console.error(
                                 "[handlePaymentWebhook] Fallback ASAAS: erro ao parsear externalReference:",
@@ -2275,6 +2445,11 @@ export class PaymentService {
                     if (!body.payment.billingType && asaasPayment.billingType) {
                         body.payment.billingType = asaasPayment.billingType;
                     }
+
+                    // dueDate fallback do ASAAS
+                    if (!dueAtFromBody && asaasPayment.dueDate) {
+                        (body.payment as any).dueDate = asaasPayment.dueDate;
+                    }
                 } catch (fallbackError) {
                     console.error(
                         "[handlePaymentWebhook] Fallback ASAAS falhou:",
@@ -2284,7 +2459,7 @@ export class PaymentService {
             }
 
             console.log(
-                `[handlePaymentWebhook] userId resolvido: ${userId}, planId resolvido: ${planId}, couponId resolvido: ${couponId}, subId resolvido: ${subId}, cashbackUsedAmount resolvido: ${cashbackUsedAmount}`,
+                `[handlePaymentWebhook] userId resolvido: ${userId}, planId resolvido: ${planId}, couponId resolvido: ${couponId}, subId resolvido: ${subId}, cashbackUsedAmount resolvido: ${cashbackUsedAmount}, cashbackBaseAmount resolvido: ${cashbackBaseAmount}`,
             );
 
             if (userId) {
@@ -2356,14 +2531,22 @@ export class PaymentService {
             const normalizedPlanId = planId ?? null;
             const normalizedCouponId = couponId ?? null;
 
-            const cashbackUsedFromExisting = this.parseCashbackAmount((existingPayment as any)?.cashbackUsedAmount);
+            const cashbackUsedFromExisting = this.parseCashbackAmount(
+                (existingPayment as any)?.cashbackUsedAmount,
+            );
             const cashbackUsedFromExternalRef = this.parseCashbackAmount(cashbackUsedAmount);
+
             const cashbackUsedToPersist =
                 cashbackUsedFromExisting > 0
                     ? cashbackUsedFromExisting
                     : cashbackUsedFromExternalRef > 0
                         ? cashbackUsedFromExternalRef
                         : 0;
+
+            const dueAt =
+                dueAtFromBody ??
+                (existingPayment as any)?.dueAt ??
+                paymentDate;
 
             const newPayment = new Payment({
                 userId: ensuredUserId,
@@ -2372,6 +2555,7 @@ export class PaymentService {
                 amount,
                 status: newStatus,
                 paymentDate,
+                dueAt,
                 paymentIdAsaas: paymentAsaasId,
                 paymentMethodId,
                 cashbackUsedAmount: cashbackUsedToPersist > 0 ? cashbackUsedToPersist : null,
@@ -2476,8 +2660,8 @@ export class PaymentService {
             // -----------------------------------------------------------------
             // FASE 4: Débito de cashback (idempotente) quando PAID
             // - Usa Payment.cashbackUsedAmount (do registro existente ou externalReference)
-            // - Cria CashbackTransaction.USED com eventKey único por payId
-            // - Decrementa wallet de forma atômica (transaction DB)
+            // - Verifica saldo disponível real (com expiração)
+            // - Decrementa wallet e registra CashbackTransaction.USED com eventKey único por payId
             // -----------------------------------------------------------------
             if (newStatus === "PAID" && cashbackUsedToPersist > 0) {
                 try {
@@ -2490,11 +2674,12 @@ export class PaymentService {
                             planId: normalizedPlanId,
                             couponId: normalizedCouponId,
                             isPlanPayment,
+                            cashbackBaseAmount: this.normalizeMoney(cashbackBaseAmount),
                         },
                     });
                 } catch (cashbackError) {
                     console.error(
-                        "[handlePaymentWebhook] ERRO ao debitar cashback em pagamento PAID. Operação idempotente, mas falhou por saldo/concorrência.",
+                        "[handlePaymentWebhook] ERRO ao debitar cashback em pagamento PAID. Operação idempotente, mas falhou por saldo/concorrência/expiração.",
                         cashbackError,
                     );
                 }
@@ -2716,6 +2901,7 @@ export class PaymentService {
                 installment?: string | null;
                 externalReference?: string | null;
                 paymentDate?: string | null;
+                dueDate?: string | null;
             };
 
             const asaasPayment = asaasPaymentRaw as AsaasPaymentLike;
