@@ -1,7 +1,5 @@
-// src/app.ts
-
-import cors from "cors";
 import express from "express";
+import cors from "cors";
 
 import { errorHandler } from "./middlewares/ErrorHandler";
 import { requestLogMiddleware } from "./middlewares/requestLogMiddleware";
@@ -10,31 +8,82 @@ import routes from "./routes";
 
 const app = express();
 
-// Necessário quando a aplicação está atrás de proxy reverso (Cloud Run, ingress, etc.)
+// Necessário quando atrás de proxy reverso (NGINX / Cloudflare)
 app.set("trust proxy", 1);
 
-// Configuração de CORS (aqui liberando tudo; ajuste se quiser restringir)
+// ---------------------------------------------------
+// CORS — Flutter Web / Ionic / Web
+// ---------------------------------------------------
+
+const allowedOrigins = [
+    // Flutter Web (porta dinâmica)
+    /^http:\/\/localhost:\d+$/,
+
+    // Ionic
+    "http://localhost:8100",
+
+    // Web dev (se existir)
+    "http://localhost:5173",
+
+    // Produção
+    "https://cashback.uauclube.com",
+    "https://app-uauclube.com",
+];
+
 app.use(
     cors({
-        origin(_requestOrigin, callback) {
-            callback(null, true);
+        origin(origin, callback) {
+            // Mobile / Flutter nativo / Postman não enviam Origin
+            if (!origin) {
+                return callback(null, true);
+            }
+
+            const isAllowed = allowedOrigins.some((allowed) => {
+                if (allowed instanceof RegExp) {
+                    return allowed.test(origin);
+                }
+                return allowed === origin;
+            });
+
+            if (isAllowed) {
+                return callback(null, true);
+            }
+
+            return callback(
+                new Error(`CORS blocked for origin: ${origin}`)
+            );
         },
+        credentials: true,
+        methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allowedHeaders: [
+            "Authorization",
+            "Content-Type",
+            "Accept",
+            "X-Requested-With",
+        ],
     }),
 );
 
-// Middleware de log de request
-app.use(requestLogMiddleware);
+// ---------------------------------------------------
+// IMPORTANTE: liberar preflight ANTES das rotas
+// ---------------------------------------------------
 
-// Parser de JSON
+app.options("*", cors());
+
+// ---------------------------------------------------
+// Middlewares globais
+// ---------------------------------------------------
+
+app.use(requestLogMiddleware);
 app.use(express.json());
 
-// Configuração do Handlebars para documentação
+// Docs
 configureHandlebars(app);
 
-// Rotas principais
+// Rotas
 app.use("/", routes);
 
-// Middleware global de tratamento de erros
+// Error handler (sempre por último)
 app.use(errorHandler);
 
 export default app;
