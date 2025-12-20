@@ -88,22 +88,36 @@ type CouponPricingResult = {
 };
 
 /**
- * Serviço de Pagamentos / Assinaturas integrados ao ASAAS.
- *
  * ---------------------------------------------------------------------
- * FASE 3:
- * - Com constraint no banco (amount > 0), este service não pode tentar persistir amount <= 0.
- * - Portanto: runtime clamp para garantir amount mínimo em todas as entradas (create/webhook).
- *
- * FASE 4 (Cashback):
- * - Permitir uso de cashback para reduzir o valor cobrado no ASAAS (via discount FIXED).
- * - Persistir o cashback usado em Payment.cashbackUsedAmount.
- * - Débito do wallet APENAS quando o pagamento for PAID (webhook), de forma idempotente.
- * - Aplicar regra de 50% do TOTAL do pagamento (após cupom) e respeitar expiração (expiresAt).
+ * EXTERNAL REFERENCE (ASAAS) - CORREÇÃO DO LIMITE 100 CARACTERES
  * ---------------------------------------------------------------------
+ *
+ * O ASAAS limita o campo `externalReference` a 100 caracteres.
+ * Antes era JSON.stringify(...) e estourava.
+ *
+ * Agora usamos formato compacto:
+ *   u:1545|p:6|c:12|s:319|cb:139.9|cu:0|cr:0|mc:1|tz:-180
+ *
+ * Regras:
+ * - Sempre <= 100 chars, senão dispara erro ANTES de chamar ASAAS.
+ * - Webhooks continuam aceitando JSON antigo (retrocompatível).
  */
+type AsaasExternalReferenceParsed = {
+    userId?: number;
+    planId?: number;
+    couponId?: number;
+    subId?: number;
+    cashbackUsedAmount?: number;
+    cashbackBaseAmount?: number;
+    cashbackRequestedAmount?: number;
+    minimumCharge?: number;
+    timeZoneOffsetMinutes?: number;
+};
+
 export class PaymentService {
     private static readonly MINIMUM_CHARGE_AMOUNT = 1;
+
+    private static readonly ASAAS_EXTERNAL_REFERENCE_MAX_LEN = 100;
 
     constructor(
         private readonly paymentRepository: IPaymentRepository,
@@ -279,6 +293,165 @@ export class PaymentService {
         if (!Number.isFinite(n)) return minimum;
         if (n <= 0) return minimum;
         return Number(n.toFixed(2));
+    }
+
+    // ---------------------------------------------------------------------
+    // Helpers gerais (timezone / money)
+    // ---------------------------------------------------------------------
+
+    private resolveTimeZoneOffsetMinutes(value: unknown, fallback = -180): number {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return fallback;
+
+        // clamp razoável de offsets globais: [-12h .. +14h] => [-720 .. +840]
+        const clamped = Math.max(-720, Math.min(840, Math.trunc(n)));
+        return clamped;
+    }
+
+    // ---------------------------------------------------------------------
+    // EXTERNAL REFERENCE (ASAAS) - compact encode/decode + retrocompat JSON
+    // ---------------------------------------------------------------------
+
+    private numberOrUndefined(value: unknown): number | undefined {
+        if (value === undefined || value === null) return undefined;
+        const n = Number(value);
+        if (!Number.isFinite(n)) return undefined;
+        return n;
+    }
+
+    private buildAsaasExternalReference(data: AsaasExternalReferenceParsed): string {
+        const parts: string[] = [];
+
+        const u = this.numberOrUndefined(data.userId);
+        if (u !== undefined) parts.push(`u:${Math.trunc(u)}`);
+
+        const p = this.numberOrUndefined(data.planId);
+        if (p !== undefined) parts.push(`p:${Math.trunc(p)}`);
+
+        const c = this.numberOrUndefined(data.couponId);
+        if (c !== undefined) parts.push(`c:${Math.trunc(c)}`);
+
+        const s = this.numberOrUndefined(data.subId);
+        if (s !== undefined) parts.push(`s:${Math.trunc(s)}`);
+
+        const cb = this.numberOrUndefined(data.cashbackBaseAmount);
+        if (cb !== undefined) parts.push(`cb:${Number(cb.toFixed(2))}`);
+
+        const cu = this.numberOrUndefined(data.cashbackUsedAmount);
+        if (cu !== undefined) parts.push(`cu:${Number(cu.toFixed(2))}`);
+
+        const cr = this.numberOrUndefined(data.cashbackRequestedAmount);
+        if (cr !== undefined) parts.push(`cr:${Number(cr.toFixed(2))}`);
+
+        const mc = this.numberOrUndefined(data.minimumCharge);
+        if (mc !== undefined) parts.push(`mc:${Number(mc.toFixed(2))}`);
+
+        const tz = this.numberOrUndefined(data.timeZoneOffsetMinutes);
+        if (tz !== undefined) parts.push(`tz:${Math.trunc(tz)}`);
+
+        const out = parts.join("|");
+
+        if (out.length === 0) {
+            return "";
+        }
+
+        if (out.length > PaymentService.ASAAS_EXTERNAL_REFERENCE_MAX_LEN) {
+            throw new AppError(
+                `externalReference excede ${PaymentService.ASAAS_EXTERNAL_REFERENCE_MAX_LEN} caracteres após compactação. Atual: ${out.length}`,
+                500,
+            );
+        }
+
+        return out;
+    }
+
+    private parseAsaasExternalReference(raw: unknown): AsaasExternalReferenceParsed | null {
+        if (!raw) return null;
+        if (typeof raw !== "string") return null;
+
+        const value = raw.trim();
+        if (!value) return null;
+
+        // Retrocompat: JSON antigo
+        if (value.startsWith("{") && value.endsWith("}")) {
+            try {
+                const parsed = JSON.parse(value) as {
+                    userId?: number;
+                    planId?: number;
+                    couponId?: number;
+                    subId?: number;
+                    cashbackUsedAmount?: number;
+                    cashbackBaseAmount?: number;
+                    cashbackRequestedAmount?: number;
+                    timeZoneOffsetMinutes?: number;
+                    minimumCharge?: number;
+                };
+
+                return {
+                    userId: this.numberOrUndefined(parsed.userId),
+                    planId: this.numberOrUndefined(parsed.planId),
+                    couponId: this.numberOrUndefined(parsed.couponId),
+                    subId: this.numberOrUndefined(parsed.subId),
+                    cashbackUsedAmount: this.numberOrUndefined(parsed.cashbackUsedAmount),
+                    cashbackBaseAmount: this.numberOrUndefined(parsed.cashbackBaseAmount),
+                    cashbackRequestedAmount: this.numberOrUndefined(parsed.cashbackRequestedAmount),
+                    timeZoneOffsetMinutes: this.numberOrUndefined(parsed.timeZoneOffsetMinutes),
+                    minimumCharge: this.numberOrUndefined(parsed.minimumCharge),
+                };
+            } catch {
+                // cai pro modo compacto abaixo
+            }
+        }
+
+        // Formato compacto: k:v|k:v
+        const out: AsaasExternalReferenceParsed = {};
+        const pairs = value.split("|").map((p) => p.trim()).filter(Boolean);
+
+        for (const pair of pairs) {
+            const idx = pair.indexOf(":");
+            if (idx <= 0) continue;
+
+            const k = pair.slice(0, idx).trim();
+            const vRaw = pair.slice(idx + 1).trim();
+            if (!vRaw) continue;
+
+            const v = this.numberOrUndefined(vRaw);
+            if (v === undefined) continue;
+
+            switch (k) {
+                case "u":
+                    out.userId = Math.trunc(v);
+                    break;
+                case "p":
+                    out.planId = Math.trunc(v);
+                    break;
+                case "c":
+                    out.couponId = Math.trunc(v);
+                    break;
+                case "s":
+                    out.subId = Math.trunc(v);
+                    break;
+                case "cb":
+                    out.cashbackBaseAmount = Number(v.toFixed(2));
+                    break;
+                case "cu":
+                    out.cashbackUsedAmount = Number(v.toFixed(2));
+                    break;
+                case "cr":
+                    out.cashbackRequestedAmount = Number(v.toFixed(2));
+                    break;
+                case "mc":
+                    out.minimumCharge = Number(v.toFixed(2));
+                    break;
+                case "tz":
+                    out.timeZoneOffsetMinutes = Math.trunc(v);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        return Object.keys(out).length > 0 ? out : null;
     }
 
     // ---------------------------------------------------------------------
@@ -871,8 +1044,26 @@ export class PaymentService {
             discount: combinedDiscount,
         });
 
-        const dueDateStr = this.isoDateString(new Date());
-        const dueAt = this.parseIsoDateToDate(dueDateStr) ?? new Date();
+        // ✅ Padroniza “data do dia” com timezone (evita virar o dia por UTC)
+        const timeZoneOffsetMinutes = this.resolveTimeZoneOffsetMinutes(
+            (data as any)?.timeZoneOffsetMinutes ?? (data as any)?.timeZoneOffset,
+            -180,
+        );
+        const dateWithTimeZone = new Date();
+        dateWithTimeZone.setMinutes(dateWithTimeZone.getMinutes() + timeZoneOffsetMinutes);
+
+        const dueDateStr = this.isoDateString(dateWithTimeZone);
+        const dueAt = this.parseIsoDateToDate(dueDateStr) ?? dateWithTimeZone;
+
+        const externalReference = this.buildAsaasExternalReference({
+            userId,
+            couponId: coupon?.id,
+            cashbackUsedAmount: cashbackPricing.cashbackUsed,
+            cashbackBaseAmount: pricing.finalAmount, // base p/ regra 50% (após cupom)
+            cashbackRequestedAmount: requestedCashback,
+            minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
+            timeZoneOffsetMinutes,
+        });
 
         const asaasPaymentPayload: AsaasCreatePaymentPayload = {
             billingType,
@@ -882,14 +1073,7 @@ export class PaymentService {
             description: `Pagamento serviços avulsos: ${services
                 .map((s) => s.name)
                 .join(", ")}`,
-            externalReference: JSON.stringify({
-                userId,
-                couponId: coupon?.id,
-                cashbackUsedAmount: cashbackPricing.cashbackUsed,
-                cashbackBaseAmount: pricing.finalAmount, // base p/ regra 50% (após cupom)
-                cashbackRequestedAmount: requestedCashback,
-                minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
-            }),
+            externalReference,
             ...modifiers,
         };
 
@@ -1119,10 +1303,13 @@ export class PaymentService {
 
         console.log("[subscribeToPlan] Criando assinatura em formato de PACOTE...");
 
-        const timeZoneOffset = (data as any)?.timeZoneOffset ?? -180;
+        const timeZoneOffsetMinutes = this.resolveTimeZoneOffsetMinutes(
+            (data as any)?.timeZoneOffsetMinutes ?? (data as any)?.timeZoneOffset,
+            -180,
+        );
         const dateWithTimeZone = new Date();
         dateWithTimeZone.setMinutes(
-            dateWithTimeZone.getMinutes() + timeZoneOffset,
+            dateWithTimeZone.getMinutes() + timeZoneOffsetMinutes,
         );
 
         const planCouponPricing = this.applyCouponWithMinimumCharge(
@@ -1185,6 +1372,18 @@ export class PaymentService {
                 discount: combinedDiscount,
             });
 
+            const externalReference = this.buildAsaasExternalReference({
+                userId,
+                couponId: coupon?.id,
+                planId: plan.id,
+                subId: subscription.id,
+                cashbackUsedAmount: cashbackPricing.cashbackUsed,
+                cashbackBaseAmount: planCouponPricing.finalAmount,
+                cashbackRequestedAmount: requestedCashback,
+                minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
+                timeZoneOffsetMinutes,
+            });
+
             const asaasPaymentPayload: AsaasCreatePaymentPayload = {
                 billingType: billingPaymentType,
                 dueDate: this.isoDateString(dateWithTimeZone),
@@ -1203,16 +1402,7 @@ export class PaymentService {
                         : undefined,
                 customer: asaasCustomer.id,
                 description: `Pagamento plano no formato PACOTE: ${plan.name}`,
-                externalReference: JSON.stringify({
-                    userId,
-                    couponId: coupon?.id,
-                    planId: plan.id,
-                    subId: subscription.id,
-                    cashbackUsedAmount: cashbackPricing.cashbackUsed,
-                    cashbackBaseAmount: planCouponPricing.finalAmount,
-                    cashbackRequestedAmount: requestedCashback,
-                    minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
-                }),
+                externalReference,
                 ...modifiers,
             };
 
@@ -1854,9 +2044,12 @@ export class PaymentService {
                 }
             }
 
-            const timeZoneOffset = (data as any)?.timeZoneOffset ?? -180;
+            const timeZoneOffsetMinutes = this.resolveTimeZoneOffsetMinutes(
+                (data as any)?.timeZoneOffsetMinutes ?? (data as any)?.timeZoneOffset,
+                -180,
+            );
             const startDate = new Date();
-            startDate.setMinutes(startDate.getMinutes() + timeZoneOffset);
+            startDate.setMinutes(startDate.getMinutes() + timeZoneOffsetMinutes);
 
             const expiresAt = this.calculatePlanExpiration(plan, startDate);
 
@@ -1907,6 +2100,18 @@ export class PaymentService {
                 discount: combinedDiscount,
             });
 
+            const externalReference = this.buildAsaasExternalReference({
+                userId: data.userId,
+                planId: plan.id,
+                couponId: coupon?.id,
+                subId: localSubscription.id,
+                cashbackUsedAmount: cashbackPricing.cashbackUsed,
+                cashbackBaseAmount: planCouponPricing.finalAmount,
+                cashbackRequestedAmount: requestedCashback,
+                minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
+                timeZoneOffsetMinutes,
+            });
+
             const payload: ASAASCreateSubscriptionDTO = {
                 customer: customerId,
                 nextDueDate: this.isoDateString(startDate),
@@ -1914,16 +2119,7 @@ export class PaymentService {
                 billingType,
                 cycle,
                 description: `Plano recorrente: ${plan.name}`,
-                externalReference: JSON.stringify({
-                    userId: data.userId,
-                    planId: plan.id,
-                    couponId: coupon?.id,
-                    subId: localSubscription.id,
-                    cashbackUsedAmount: cashbackPricing.cashbackUsed,
-                    cashbackBaseAmount: planCouponPricing.finalAmount,
-                    cashbackRequestedAmount: requestedCashback,
-                    minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
-                }),
+                externalReference,
                 ...modifiers,
             } as ASAASCreateSubscriptionDTO;
 
@@ -2092,22 +2288,12 @@ export class PaymentService {
             let externalReferenceSubId: number | undefined;
 
             if (externalReferenceRaw) {
-                try {
-                    const externalReference = JSON.parse(externalReferenceRaw) as {
-                        userId?: number;
-                        planId?: number;
-                        couponId?: number;
-                        subId?: number;
-                    };
-                    externalReferenceUserId = externalReference.userId;
-                    externalReferencePlanId = externalReference.planId;
-                    externalReferenceCouponId = externalReference.couponId;
-                    externalReferenceSubId = externalReference.subId;
-                } catch (parseError) {
-                    console.error(
-                        "[handleSubscriptionWebhook] Erro ao fazer parse da externalReference:",
-                        parseError,
-                    );
+                const parsed = this.parseAsaasExternalReference(externalReferenceRaw);
+                if (parsed) {
+                    externalReferenceUserId = parsed.userId;
+                    externalReferencePlanId = parsed.planId;
+                    externalReferenceCouponId = parsed.couponId;
+                    externalReferenceSubId = parsed.subId;
                 }
             }
 
@@ -2243,59 +2429,83 @@ export class PaymentService {
                 return { status: 200, message: "ID de pagamento não encontrado" };
             }
 
-            const rawAmount = Number(body.payment.value) || 0;
-            const amount = this.ensureMinimumAmount(
-                rawAmount,
-                PaymentService.MINIMUM_CHARGE_AMOUNT,
-            );
+            // ⚠️ NÃO usar isso como fonte de verdade do amount quando há discount/modifiers.
+            const webhookValue = Number(body.payment.value) || 0;
 
-            const paymentDate =
-                body.payment.paymentDate !== undefined &&
-                body.payment.paymentDate !== null
+            // ✅ Agora é LET: pode ser preenchido no fallback do ASAAS
+            let paymentDate =
+                body.payment.paymentDate !== undefined && body.payment.paymentDate !== null
                     ? new Date(body.payment.paymentDate)
                     : new Date();
 
-            const dueAtFromBody =
+            // ✅ Agora é LET: pode ser preenchido no fallback do ASAAS
+            let dueAtFromBody =
                 (body.payment as any)?.dueDate !== undefined && (body.payment as any)?.dueDate !== null
-                    ? this.parseIsoDateToDate((body.payment as any)?.dueDate) // pode ser YYYY-MM-DD
+                    ? this.parseIsoDateToDate((body.payment as any)?.dueDate)
                     : null;
 
             let userId: number | undefined;
             let planId: number | undefined;
             let couponId: number | undefined;
             let subId: number | undefined;
+
             let cashbackUsedAmount: number | undefined;
             let cashbackBaseAmount: number | undefined;
 
+            // ✅ novo: timezone para competência/recorrência
+            let timeZoneOffsetMinutes: number | undefined;
+
+            // ✅ novo: mínimo para clamp no webhook (vem do externalReference)
+            let minimumCharge: number | undefined;
+
+            // Mantém um objeto parseado (para recalcular amount corretamente)
+            let parsedExternalReference:
+                | {
+                userId?: number;
+                planId?: number;
+                couponId?: number;
+                subId?: number;
+                cashbackUsedAmount?: number;
+                cashbackBaseAmount?: number;
+                timeZoneOffsetMinutes?: number;
+                minimumCharge?: number;
+            }
+                | null = null;
+
             if (body.payment.externalReference) {
-                try {
-                    const externalReference = JSON.parse(
-                        body.payment.externalReference,
-                    ) as {
-                        userId?: number;
-                        planId?: number;
-                        couponId?: number;
-                        subId?: number;
-                        cashbackUsedAmount?: number;
-                        cashbackBaseAmount?: number;
+                const parsed = this.parseAsaasExternalReference(body.payment.externalReference);
+                if (parsed) {
+                    parsedExternalReference = {
+                        userId: parsed.userId,
+                        planId: parsed.planId,
+                        couponId: parsed.couponId,
+                        subId: parsed.subId,
+                        cashbackUsedAmount: parsed.cashbackUsedAmount,
+                        cashbackBaseAmount: parsed.cashbackBaseAmount,
+                        timeZoneOffsetMinutes: parsed.timeZoneOffsetMinutes,
+                        minimumCharge: parsed.minimumCharge,
                     };
 
-                    userId = externalReference.userId;
-                    planId = externalReference.planId;
-                    couponId = externalReference.couponId;
-                    subId = externalReference.subId;
-                    cashbackUsedAmount = externalReference.cashbackUsedAmount;
-                    cashbackBaseAmount = externalReference.cashbackBaseAmount;
-                } catch (parseError) {
-                    console.error(
-                        "[handlePaymentWebhook] Erro ao fazer parse da externalReference:",
-                        parseError,
-                    );
+                    userId = parsed.userId;
+                    planId = parsed.planId;
+                    couponId = parsed.couponId;
+                    subId = parsed.subId;
+
+                    cashbackUsedAmount = parsed.cashbackUsedAmount;
+                    cashbackBaseAmount = parsed.cashbackBaseAmount;
+
+                    timeZoneOffsetMinutes = parsed.timeZoneOffsetMinutes;
+                    minimumCharge = parsed.minimumCharge;
                 }
             }
 
+            const resolvedTimeZoneOffsetMinutes = this.resolveTimeZoneOffsetMinutes(
+                timeZoneOffsetMinutes,
+                -180,
+            );
+
             console.log(
-                `[handlePaymentWebhook] userId inicial: ${userId}, planId inicial: ${planId}, couponId inicial: ${couponId}, subId inicial: ${subId}, cashbackUsedAmount inicial: ${cashbackUsedAmount}, cashbackBaseAmount inicial: ${cashbackBaseAmount}`,
+                `[handlePaymentWebhook] userId inicial: ${userId}, planId inicial: ${planId}, couponId inicial: ${couponId}, subId inicial: ${subId}, cashbackUsedAmount inicial: ${cashbackUsedAmount}, cashbackBaseAmount inicial: ${cashbackBaseAmount}, minimumCharge inicial: ${minimumCharge}, timeZoneOffsetMinutes inicial: ${timeZoneOffsetMinutes} (resolvido=${resolvedTimeZoneOffsetMinutes})`,
             );
 
             if ((!userId || !planId) && body.payment.subscription) {
@@ -2335,11 +2545,9 @@ export class PaymentService {
                 console.log(
                     "[handlePaymentWebhook] Tentando resolver userId/planId via subId (registro local)...",
                 );
-                const subscriptionFromIdRaw =
-                    await this.subscriptionRepository.findById(subId);
+                const subscriptionFromIdRaw = await this.subscriptionRepository.findById(subId);
                 if (subscriptionFromIdRaw) {
-                    const subscriptionFromId =
-                        this.hydrateSubscription(subscriptionFromIdRaw);
+                    const subscriptionFromId = this.hydrateSubscription(subscriptionFromIdRaw);
 
                     userId = userId ?? subscriptionFromId.userId;
                     planId = planId ?? (subscriptionFromId.planId ?? undefined);
@@ -2347,6 +2555,11 @@ export class PaymentService {
                 }
             }
 
+            // ✅ Busca existingPayment ANTES do cálculo do amount (pra poder preservar amount local se necessário)
+            const existingPayment = await this.paymentRepository.getByAsaasId(paymentAsaasId);
+
+            // ✅ Se ainda faltar vínculo (ou quiser enriquecer dados), consulta ASAAS
+            // OBS: não exigimos planId para pagamentos avulsos, mas a consulta pode preencher dados legados.
             if (!userId || (!planId && planId !== 0)) {
                 try {
                     console.log(
@@ -2368,55 +2581,60 @@ export class PaymentService {
                     const asaasPaymentRaw = await asaasGetPayment(paymentAsaasId);
                     const asaasPayment = asaasPaymentRaw as AsaasPaymentLike;
 
+                    // ✅ Se o webhook veio sem paymentDate, tenta preencher do ASAAS
                     if (
-                        !body.payment.externalReference &&
-                        asaasPayment.externalReference
+                        (body.payment.paymentDate === undefined || body.payment.paymentDate === null) &&
+                        asaasPayment.paymentDate
                     ) {
+                        body.payment.paymentDate = asaasPayment.paymentDate as any;
+                        paymentDate = new Date(asaasPayment.paymentDate);
+                    }
+
+                    // ✅ Se o webhook veio sem dueDate, tenta preencher do ASAAS
+                    if (!dueAtFromBody && asaasPayment.dueDate) {
+                        (body.payment as any).dueDate = asaasPayment.dueDate;
+                        dueAtFromBody = this.parseIsoDateToDate(asaasPayment.dueDate);
+                    }
+
+                    if (!body.payment.externalReference && asaasPayment.externalReference) {
                         body.payment.externalReference = asaasPayment.externalReference;
 
-                        try {
-                            const externalReference = JSON.parse(
-                                asaasPayment.externalReference,
-                            ) as {
-                                userId?: number;
-                                planId?: number;
-                                couponId?: number;
-                                subId?: number;
-                                cashbackUsedAmount?: number;
-                                cashbackBaseAmount?: number;
+                        const parsed = this.parseAsaasExternalReference(asaasPayment.externalReference);
+                        if (parsed) {
+                            parsedExternalReference = {
+                                userId: parsed.userId,
+                                planId: parsed.planId,
+                                couponId: parsed.couponId,
+                                subId: parsed.subId,
+                                cashbackUsedAmount: parsed.cashbackUsedAmount,
+                                cashbackBaseAmount: parsed.cashbackBaseAmount,
+                                timeZoneOffsetMinutes: parsed.timeZoneOffsetMinutes,
+                                minimumCharge: parsed.minimumCharge,
                             };
 
-                            userId = userId ?? externalReference.userId;
-                            planId = planId ?? externalReference.planId;
-                            couponId = couponId ?? externalReference.couponId;
-                            subId = subId ?? externalReference.subId;
-                            cashbackUsedAmount =
-                                cashbackUsedAmount ?? externalReference.cashbackUsedAmount;
-                            cashbackBaseAmount =
-                                cashbackBaseAmount ?? externalReference.cashbackBaseAmount;
-                        } catch (parseError) {
-                            console.error(
-                                "[handlePaymentWebhook] Fallback ASAAS: erro ao parsear externalReference:",
-                                parseError,
-                            );
+                            userId = userId ?? parsed.userId;
+                            planId = planId ?? parsed.planId;
+                            couponId = couponId ?? parsed.couponId;
+                            subId = subId ?? parsed.subId;
+
+                            cashbackUsedAmount = cashbackUsedAmount ?? parsed.cashbackUsedAmount;
+                            cashbackBaseAmount = cashbackBaseAmount ?? parsed.cashbackBaseAmount;
+
+                            timeZoneOffsetMinutes = timeZoneOffsetMinutes ?? parsed.timeZoneOffsetMinutes;
+                            minimumCharge = minimumCharge ?? parsed.minimumCharge;
                         }
                     }
 
                     const subscriptionAsaasId =
-                        body.payment.subscription ??
-                        asaasPayment.subscription ??
-                        undefined;
+                        body.payment.subscription ?? asaasPayment.subscription ?? undefined;
 
                     const installmentAsaasId =
-                        body.payment.installment ??
-                        asaasPayment.installment ??
-                        undefined;
+                        body.payment.installment ?? asaasPayment.installment ?? undefined;
 
                     if ((!userId || !planId) && subscriptionAsaasId) {
-                        const localSubRaw =
-                            await this.subscriptionRepository.getByAsaasId(
-                                subscriptionAsaasId,
-                            );
+                        const localSubRaw = await this.subscriptionRepository.getByAsaasId(
+                            subscriptionAsaasId,
+                        );
                         if (localSubRaw) {
                             const localSub = this.hydrateSubscription(localSubRaw);
                             userId = userId ?? localSub.userId;
@@ -2436,8 +2654,7 @@ export class PaymentService {
                                 this.hydrateSubscription(localSubByInstallmentRaw);
 
                             userId = userId ?? localSubByInstallment.userId;
-                            planId =
-                                planId ?? (localSubByInstallment.planId ?? undefined);
+                            planId = planId ?? (localSubByInstallment.planId ?? undefined);
                             subId = subId ?? localSubByInstallment.id;
                         }
                     }
@@ -2445,21 +2662,18 @@ export class PaymentService {
                     if (!body.payment.billingType && asaasPayment.billingType) {
                         body.payment.billingType = asaasPayment.billingType;
                     }
-
-                    // dueDate fallback do ASAAS
-                    if (!dueAtFromBody && asaasPayment.dueDate) {
-                        (body.payment as any).dueDate = asaasPayment.dueDate;
-                    }
                 } catch (fallbackError) {
-                    console.error(
-                        "[handlePaymentWebhook] Fallback ASAAS falhou:",
-                        fallbackError,
-                    );
+                    console.error("[handlePaymentWebhook] Fallback ASAAS falhou:", fallbackError);
                 }
             }
 
+            const resolvedTimeZoneOffsetMinutesFinal = this.resolveTimeZoneOffsetMinutes(
+                timeZoneOffsetMinutes,
+                -180,
+            );
+
             console.log(
-                `[handlePaymentWebhook] userId resolvido: ${userId}, planId resolvido: ${planId}, couponId resolvido: ${couponId}, subId resolvido: ${subId}, cashbackUsedAmount resolvido: ${cashbackUsedAmount}, cashbackBaseAmount resolvido: ${cashbackBaseAmount}`,
+                `[handlePaymentWebhook] userId resolvido: ${userId}, planId resolvido: ${planId}, couponId resolvido: ${couponId}, subId resolvido: ${subId}, cashbackUsedAmount resolvido: ${cashbackUsedAmount}, cashbackBaseAmount resolvido: ${cashbackBaseAmount}, minimumCharge resolvido: ${minimumCharge}, timeZoneOffsetMinutes resolvido: ${timeZoneOffsetMinutes} (final=${resolvedTimeZoneOffsetMinutesFinal})`,
             );
 
             if (userId) {
@@ -2468,31 +2682,21 @@ export class PaymentService {
                     console.error(
                         `[handlePaymentWebhook] Usuário ID ${userId} não encontrado. Pulando inserção de pagamento.`,
                     );
-                    return {
-                        status: 200,
-                        message: `Usuário ID ${userId} não encontrado`,
-                    };
+                    return { status: 200, message: `Usuário ID ${userId} não encontrado` };
                 }
             } else {
-                console.warn(
-                    "[handlePaymentWebhook] userId é 0 ou nulo. Pulando inserção de pagamento.",
-                );
-                return {
-                    status: 200,
-                    message: "Nenhum userId encontrado para associar o pagamento",
-                };
+                console.warn("[handlePaymentWebhook] userId é 0 ou nulo. Pulando inserção de pagamento.");
+                return { status: 200, message: "Nenhum userId encontrado para associar o pagamento" };
             }
 
+            // Só valida plano se existir (pagamento de plano).
             if (planId) {
                 const planExists = await this.planRepository.findById(planId);
                 if (!planExists) {
                     console.error(
                         `[handlePaymentWebhook] Plano ID ${planId} não encontrado. Pulando inserção.`,
                     );
-                    return {
-                        status: 200,
-                        message: `Plano ID ${planId} não encontrado`,
-                    };
+                    return { status: 200, message: `Plano ID ${planId} não encontrado` };
                 }
             }
 
@@ -2502,30 +2706,35 @@ export class PaymentService {
                     console.error(
                         `[handlePaymentWebhook] Cupom ID ${couponId} não encontrado. Pulando inserção.`,
                     );
-                    return {
-                        status: 200,
-                        message: `Cupom ID ${couponId} não encontrado`,
-                    };
+                    return { status: 200, message: `Cupom ID ${couponId} não encontrado` };
                 }
             }
 
-            const existingPayment =
-                await this.paymentRepository.getByAsaasId(paymentAsaasId);
+            // ✅ CORREÇÃO PRINCIPAL:
+            // amount precisa refletir o valor final (após cupom + cashback),
+            // calculado a partir do externalReference (cashbackBaseAmount - cashbackUsedAmount),
+            // e com clamp mínimo (minimumCharge).
+            const amount = this.resolveFinalAmountFromExternalReference({
+                webhookValue,
+                existingAmount: (existingPayment as any)?.amount,
+                externalReference: parsedExternalReference
+                    ? {
+                        cashbackUsedAmount: parsedExternalReference.cashbackUsedAmount,
+                        cashbackBaseAmount: parsedExternalReference.cashbackBaseAmount,
+                        minimumCharge: parsedExternalReference.minimumCharge,
+                    }
+                    : null,
+            });
 
             console.log(
                 `[handlePaymentWebhook] ${
                     existingPayment ? "Atualizando" : "Registrando"
-                } pagamento => userId: ${userId}, planId: ${planId}, couponId: ${
-                    couponId ?? null
-                }, amount: ${amount}, status: ${newStatus}`,
+                } pagamento => userId: ${userId}, planId: ${planId}, couponId: ${couponId ?? null}, amount(FINAL): ${amount}, status: ${newStatus}`,
             );
 
             const paymentMethodIdFromBody = body.payment.billingType ?? undefined;
-
             const paymentMethodId: string =
-                paymentMethodIdFromBody ??
-                existingPayment?.paymentMethodId ??
-                "UNKNOWN";
+                paymentMethodIdFromBody ?? existingPayment?.paymentMethodId ?? "UNKNOWN";
 
             const ensuredUserId = userId as number;
             const normalizedPlanId = planId ?? null;
@@ -2544,9 +2753,7 @@ export class PaymentService {
                         : 0;
 
             const dueAt =
-                dueAtFromBody ??
-                (existingPayment as any)?.dueAt ??
-                paymentDate;
+                dueAtFromBody ?? (existingPayment as any)?.dueAt ?? paymentDate;
 
             const newPayment = new Payment({
                 userId: ensuredUserId,
@@ -2564,11 +2771,7 @@ export class PaymentService {
             let savedPaymentId: number | undefined;
 
             if (existingPayment) {
-                await this.paymentRepository.update(
-                    { id: existingPayment.id },
-                    newPayment,
-                    true,
-                );
+                await this.paymentRepository.update({ id: existingPayment.id }, newPayment, true);
                 savedPaymentId = existingPayment.id;
             } else {
                 const created = await this.paymentRepository.create(newPayment as any);
@@ -2602,10 +2805,9 @@ export class PaymentService {
             }
 
             if (body.payment.installment) {
-                const subRaw =
-                    await this.subscriptionRepository.getByInstallmentIdAsaas(
-                        body.payment.installment,
-                    );
+                const subRaw = await this.subscriptionRepository.getByInstallmentIdAsaas(
+                    body.payment.installment,
+                );
 
                 const subscription = subRaw ? this.hydrateSubscription(subRaw) : null;
 
@@ -2622,19 +2824,20 @@ export class PaymentService {
 
             const isPlanPayment = normalizedPlanId !== null;
 
+            // -----------------------------------------------------------------
+            // REFERRAL (Grupo/Posição)
+            // -----------------------------------------------------------------
             if (newStatus === "PAID" && isPlanPayment) {
                 if (subId !== undefined && subId !== null) {
                     try {
-                        await this.referralBonusService.generateUniqueOnFirstPaidSubscription(
-                            {
-                                payerId: ensuredUserId,
-                                subscriptionId: subId,
-                                paymentId: savedPaymentId,
-                            },
-                        );
+                        await this.referralBonusService.generateUniqueOnFirstPaidSubscription({
+                            payerId: ensuredUserId,
+                            subscriptionId: subId,
+                            paymentId: savedPaymentId,
+                        });
                     } catch (bonusError) {
                         console.warn(
-                            "[handlePaymentWebhook] Bônus UNIQUE falhou (provável idempotência/duplicidade). Ignorando para não quebrar webhook.",
+                            "[handlePaymentWebhook] Bônus UNIQUE falhou (provável idempotência/duplicidade/sem grupo). Ignorando para não quebrar webhook.",
                             bonusError,
                         );
                     }
@@ -2646,11 +2849,11 @@ export class PaymentService {
                             payerId: ensuredUserId,
                             paymentId: savedPaymentId,
                             paymentDate,
-                            timeZoneOffsetMinutes: -180,
+                            timeZoneOffsetMinutes: resolvedTimeZoneOffsetMinutesFinal,
                         });
                     } catch (bonusError) {
                         console.warn(
-                            "[handlePaymentWebhook] Bônus RECURRENT falhou (provável idempotência/duplicidade). Ignorando para não quebrar webhook.",
+                            "[handlePaymentWebhook] Bônus RECURRENT falhou (provável idempotência/duplicidade/sem grupo). Ignorando para não quebrar webhook.",
                             bonusError,
                         );
                     }
@@ -2659,9 +2862,6 @@ export class PaymentService {
 
             // -----------------------------------------------------------------
             // FASE 4: Débito de cashback (idempotente) quando PAID
-            // - Usa Payment.cashbackUsedAmount (do registro existente ou externalReference)
-            // - Verifica saldo disponível real (com expiração)
-            // - Decrementa wallet e registra CashbackTransaction.USED com eventKey único por payId
             // -----------------------------------------------------------------
             if (newStatus === "PAID" && cashbackUsedToPersist > 0) {
                 try {
@@ -2675,6 +2875,8 @@ export class PaymentService {
                             couponId: normalizedCouponId,
                             isPlanPayment,
                             cashbackBaseAmount: this.normalizeMoney(cashbackBaseAmount),
+                            minimumCharge: this.normalizeMoney(minimumCharge),
+                            timeZoneOffsetMinutes: resolvedTimeZoneOffsetMinutesFinal,
                         },
                     });
                 } catch (cashbackError) {
@@ -2685,15 +2887,9 @@ export class PaymentService {
                 }
             }
 
-            console.log(
-                `[handlePaymentWebhook] Pagamento armazenado com sucesso: ${paymentAsaasId}`,
-            );
+            console.log(`[handlePaymentWebhook] Pagamento armazenado com sucesso: ${paymentAsaasId}`);
 
-            return {
-                status: 200,
-                message: "Pagamento processado com sucesso",
-                newStatus,
-            };
+            return { status: 200, message: "Pagamento processado com sucesso", newStatus };
         } catch (error) {
             console.error("[handlePaymentWebhook] Erro inesperado:", error);
             return { status: 200, message: "Erro interno", error };
@@ -2942,27 +3138,10 @@ export class PaymentService {
                     }
 
                     if (!subscription && asaasPayment.externalReference) {
-                        try {
-                            const externalReference = JSON.parse(
-                                asaasPayment.externalReference,
-                            ) as { subId?: number };
-
-                            if (
-                                externalReference.subId !== undefined &&
-                                externalReference.subId !== null
-                            ) {
-                                const subRaw = await this.subscriptionRepository.findById(
-                                    externalReference.subId,
-                                );
-                                subscription = subRaw
-                                    ? this.hydrateSubscription(subRaw)
-                                    : null;
-                            }
-                        } catch (error) {
-                            console.error(
-                                "[syncPaymentWithAsaasByLocalId] Erro ao fazer parse da externalReference:",
-                                error,
-                            );
+                        const parsed = this.parseAsaasExternalReference(asaasPayment.externalReference);
+                        if (parsed?.subId !== undefined && parsed?.subId !== null) {
+                            const subRaw = await this.subscriptionRepository.findById(parsed.subId);
+                            subscription = subRaw ? this.hydrateSubscription(subRaw) : null;
                         }
                     }
 
@@ -3000,5 +3179,41 @@ export class PaymentService {
 
     public async getMRR() {
         return this.paymentRepository.getMRR();
+    }
+
+    private resolveFinalAmountFromExternalReference(params: {
+        webhookValue: unknown;
+        existingAmount: unknown;
+        externalReference?: {
+            cashbackUsedAmount?: unknown;
+            cashbackBaseAmount?: unknown;
+            minimumCharge?: unknown;
+        } | null;
+    }): number {
+        const ext = params.externalReference ?? null;
+
+        const minCharge = this.ensureMinimumAmount(
+            Number(ext?.minimumCharge ?? PaymentService.MINIMUM_CHARGE_AMOUNT),
+            PaymentService.MINIMUM_CHARGE_AMOUNT,
+        );
+
+        const baseAfterCoupon = this.normalizeMoney(ext?.cashbackBaseAmount);
+        const cashbackUsed = this.parseCashbackAmount(ext?.cashbackUsedAmount);
+
+        // ✅ Fonte de verdade: externalReference (cashbackBaseAmount - cashbackUsedAmount)
+        if (baseAfterCoupon > 0) {
+            const computed = baseAfterCoupon - cashbackUsed;
+            return this.ensureMinimumAmount(computed, minCharge);
+        }
+
+        // ✅ Fallback seguro: se já existe pagamento local com amount válido, não sobrescreve com "value" do webhook
+        const existing = this.normalizeMoney(params.existingAmount);
+        if (existing > 0) {
+            return this.ensureMinimumAmount(existing, minCharge);
+        }
+
+        // ✅ Último fallback: usa o valor do webhook
+        const webhookValue = this.normalizeMoney(params.webhookValue);
+        return this.ensureMinimumAmount(webhookValue, minCharge);
     }
 }

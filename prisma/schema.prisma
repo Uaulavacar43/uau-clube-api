@@ -32,6 +32,7 @@ model User {
   deletedAt       DateTime?
   status          UserStatus @default(ACTIVE)
 
+  // (Legado) referrerId em árvore
   referrerId Int?
   referrals  User[] @relation("UserReferrals")
   referrer   User?  @relation("UserReferrals", fields: [referrerId], references: [id])
@@ -44,6 +45,9 @@ model User {
 
   cashbackWallets      CashbackWallet[]
   cashbackTransactions CashbackTransaction[]
+
+  // ✅ NOVO (Opção B): participação em grupo fechado (até 9 pessoas)
+  referralGroupMemberships ReferralGroupMember[]
 
   requestLogs                RequestLog[]
   webhookLogs                WebhookLog[]
@@ -106,8 +110,14 @@ model CashbackTransaction {
 
   meta Json?
 
-  // ✅ NOVO: expiração (ex.: welcome bonus válido por 7 dias)
+  // ✅ expiração (ex.: welcome bonus válido por 7 dias)
   expiresAt DateTime?
+
+  // ✅ NOVO (Opção B): rastreio do grupo e posição (auditoria total)
+  referralGroupId  Int?
+  referralPosition Int?
+
+  referralGroup ReferralGroup? @relation(fields: [referralGroupId], references: [id])
 
   createdAt DateTime @default(now())
 
@@ -116,6 +126,8 @@ model CashbackTransaction {
   @@index([userId])
   @@index([createdAt])
   @@index([expiresAt])
+  @@index([referralGroupId])
+  @@index([referralPosition])
   @@schema("public")
 }
 
@@ -150,8 +162,8 @@ model ReferralBonus {
   @@schema("public")
 }
 
-// ✅ NOVO: Configuração de bônus por nível do MMN (até 9 níveis)
-// (evita hardcode e permite ajuste sem deploy)
+// ✅ Configuração de bônus por NÍVEL (LEGADO / compat)
+// (se você ainda usa “níveis” em alguma parte do código)
 model ReferralLevelConfig {
   id        Int      @id @default(autoincrement())
   level     Int      @unique
@@ -160,8 +172,74 @@ model ReferralLevelConfig {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([isActive])
   @@schema("public")
 }
+
+// -----------------------------------------------------------------------
+// ✅ NOVO (Opção B): GRUPO FECHADO (9 pessoas) + POSIÇÃO + CONFIG POR POSIÇÃO
+// -----------------------------------------------------------------------
+
+model ReferralGroup {
+  id         Int     @id @default(autoincrement())
+  maxMembers Int     @default(9)
+  isClosed   Boolean @default(false)
+
+  // Se 1 membro ficar inadimplente -> suspende cashback mensal do grupo
+  cashbackSuspended Boolean @default(false)
+
+  createdAt DateTime  @default(now())
+  closedAt  DateTime?
+  updatedAt DateTime  @updatedAt
+
+  members              ReferralGroupMember[]
+  cashbackTransactions CashbackTransaction[]
+
+  @@index([createdAt])
+  @@index([isClosed])
+  @@index([cashbackSuspended])
+  @@schema("public")
+}
+
+model ReferralGroupMember {
+  id       Int @id @default(autoincrement())
+  groupId  Int
+  userId   Int
+  position Int // 1..9
+
+  joinedAt DateTime @default(now())
+
+  group ReferralGroup @relation(fields: [groupId], references: [id])
+  user  User          @relation(fields: [userId], references: [id])
+
+  @@unique([groupId, userId])
+  @@unique([groupId, position])
+  @@index([userId])
+  @@index([groupId])
+  @@index([position])
+  @@schema("public")
+}
+
+// ✅ Configuração flexível por POSIÇÃO e por TIPO (UNIQUE/RECURRENT)
+// Ex.: position=1, type=RECURRENT, amount=3.00
+model ReferralPositionBonusConfig {
+  id        Int       @id @default(autoincrement())
+  position  Int
+  type      BonusType
+  amount    Float
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([position, type])
+  @@index([position])
+  @@index([type])
+  @@schema("public")
+}
+
+// -----------------------------------------------------------------------
+// DEMAIS MODELOS (PUBLIC)
+// -----------------------------------------------------------------------
 
 model Plan {
   id              Int             @id @default(autoincrement())
@@ -210,7 +288,7 @@ model Payment {
   feeAmount            Float?
   netAmount            Float?
 
-  // ✅ NOVO: vencimento (base para “inadimplente” quando status=PENDING e dueAt < hoje)
+  // ✅ vencimento (base para inadimplência quando status=PENDING e dueAt < hoje)
   dueAt DateTime?
 
   webhookLogs                WebhookLog[]

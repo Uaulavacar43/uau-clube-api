@@ -5,6 +5,14 @@ import type {
     IUserRepository,
     ReferralSource,
 } from "../../repositories/interfaces/IUserRepository";
+import prisma from "../../config/dbConfig";
+import {
+    Prisma,
+    BonusType,
+    TransactionType,
+    TransactionSource,
+    WalletType,
+} from "@prisma/client";
 
 export interface AttachReferralOnSignupInput {
     userId: number;
@@ -26,17 +34,30 @@ export interface ValidateReferralResult {
 }
 
 export class ReferralsService {
+    private static readonly DEFAULT_MAX_MEMBERS = 9;
+
     constructor(private readonly userRepository: IUserRepository) {}
 
-    /**
-     * Resolve o referrer (quem indicou) via referralCode.
-     * Retorna null se não existir / inativo / vazio.
-     */
+    // ---------------------------------------------------------------------
+    // NORMALIZA JSON PARA PRISMA
+    // ---------------------------------------------------------------------
+    private normalizePrismaJsonMeta(
+        meta: unknown,
+    ): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput | undefined {
+        if (meta === null || meta === undefined) {
+            return undefined;
+        }
+
+        return meta as Prisma.InputJsonValue;
+    }
+
+    // ---------------------------------------------------------------------
+    // RESOLVE REFERRER POR CÓDIGO
+    // ---------------------------------------------------------------------
     public async resolveReferrer(referralCode: string): Promise<User | null> {
         const code = (referralCode ?? "").trim();
         if (!code) return null;
 
-        // withIsDeleted=false para não aceitar deletados
         const referrer = await this.userRepository.findByReferralCode(code, false);
         if (!referrer) return null;
 
@@ -47,108 +68,336 @@ export class ReferralsService {
         return referrer;
     }
 
-    /**
-     * Mesmo payload do endpoint /referrals/validate
-     */
-    public async validateReferral(referralCode: string): Promise<ValidateReferralResult> {
+    // ---------------------------------------------------------------------
+    // VALIDAR REFERRAL (ENDPOINT)
+    // ---------------------------------------------------------------------
+    public async validateReferral(
+        referralCode: string,
+    ): Promise<ValidateReferralResult> {
         const referrer = await this.resolveReferrer(referralCode);
 
         return {
             isValid: Boolean(referrer),
-            referrer: referrer ? { id: (referrer as any).id, name: (referrer as any).name } : null,
+            referrer: referrer
+                ? { id: (referrer as any).id, name: (referrer as any).name }
+                : null,
         };
     }
 
+    // ---------------------------------------------------------------------
+    // 🔥 EVENTO ECONÔMICO: USUÁRIO ENTROU POR REFERRAL
+    // ---------------------------------------------------------------------
     /**
-     * FASE 1:
-     * - valida inputs
-     * - resolve referrer por id ou code
-     * - bloqueia auto-indicação
-     * - bloqueia troca (se já tem referrerId ou já tem auditoria)
-     * - grava vínculo (User.referrerId)
-     * - grava auditoria (UserReferral)
-     *
-     * Importante: NÃO gera bônus aqui.
+     * Disparado UMA ÚNICA VEZ no cadastro.
+     * Responsável por:
+     * - identificar grupo
+     * - identificar posição do novo usuário
+     * - pagar bônus UNIQUE para TODOS do grupo até essa posição
+     * - creditar cashback corretamente
      */
-    public async attachReferralOnSignup(input: AttachReferralOnSignupInput): Promise<void> {
+    public async onUserJoinedByReferral(params: {
+        newUserId: number;
+    }): Promise<void> {
+        const { newUserId } = params;
+
+        const membership = await prisma.referralGroupMember.findFirst({
+            where: { userId: newUserId },
+            include: { group: true },
+        });
+
+        if (!membership) {
+            throw new AppError(
+                "Usuário não pertence a nenhum grupo de indicação.",
+                500,
+            );
+        }
+
+        const { groupId, position } = membership;
+
+        const bonusConfigs =
+            await prisma.referralPositionBonusConfig.findMany({
+                where: {
+                    isActive: true,
+                    type: BonusType.UNIQUE,
+                    position: { lte: position },
+                },
+                orderBy: { position: "asc" },
+            });
+
+        for (const config of bonusConfigs) {
+            const receiverMembership =
+                await prisma.referralGroupMember.findFirst({
+                    where: {
+                        groupId,
+                        position: config.position,
+                    },
+                });
+
+            if (!receiverMembership) continue;
+
+            const eventKey = `JOIN:GROUP:${groupId}:POS:${config.position}:NEW_USER:${newUserId}`;
+
+            try {
+                const bonus = await prisma.referralBonus.create({
+                    data: {
+                        receiverId: receiverMembership.userId,
+                        payerId: newUserId,
+                        level: config.position,
+                        type: BonusType.UNIQUE,
+                        amount: config.amount,
+                        paymentStatus: "PAID",
+                        eventKey,
+                    },
+                });
+
+                await prisma.cashbackWallet.upsert({
+                    where: {
+                        userId_type: {
+                            userId: receiverMembership.userId,
+                            type: WalletType.INTERNAL,
+                        },
+                    },
+                    create: {
+                        userId: receiverMembership.userId,
+                        type: WalletType.INTERNAL,
+                        balance: 0,
+                    },
+                    update: {},
+                });
+
+                await prisma.cashbackTransaction.create({
+                    data: {
+                        userId: receiverMembership.userId,
+                        type: TransactionType.EARNED,
+                        source: TransactionSource.INDICATION,
+                        amount: config.amount,
+                        relatedId: String(bonus.id),
+                        eventKey,
+                        referralGroupId: groupId,
+                        referralPosition: config.position,
+                        meta: {
+                            reason: "USER_JOINED_GROUP",
+                            newUserId,
+                        },
+                    },
+                });
+
+                await prisma.cashbackWallet.update({
+                    where: {
+                        userId_type: {
+                            userId: receiverMembership.userId,
+                            type: WalletType.INTERNAL,
+                        },
+                    },
+                    data: {
+                        balance: { increment: config.amount },
+                    },
+                });
+            } catch (error: any) {
+                if (error?.code === "P2002") {
+                    continue;
+                }
+                throw error;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // GRUPO FECHADO (9 PESSOAS) — CRIAÇÃO E ALOCAÇÃO
+    // ---------------------------------------------------------------------
+    private async getOrCreateOpenLeaderGroupTx(
+        tx: Prisma.TransactionClient,
+        leaderUserId: number,
+    ): Promise<{ groupId: number; maxMembers: number }> {
+        const existing = await tx.referralGroupMember.findFirst({
+            where: {
+                userId: leaderUserId,
+                position: 1,
+                group: { isClosed: false },
+            },
+            select: {
+                groupId: true,
+                group: { select: { maxMembers: true } },
+            },
+        });
+
+        if (existing && existing.group) {
+            return {
+                groupId: existing.groupId,
+                maxMembers: existing.group.maxMembers,
+            };
+        }
+
+        const group = await tx.referralGroup.create({
+            data: {
+                maxMembers: ReferralsService.DEFAULT_MAX_MEMBERS,
+                isClosed: false,
+                cashbackSuspended: false,
+            },
+        });
+
+        await tx.referralGroupMember.create({
+            data: {
+                groupId: group.id,
+                userId: leaderUserId,
+                position: 1,
+            },
+        });
+
+        return { groupId: group.id, maxMembers: group.maxMembers };
+    }
+
+    private findNextFreePosition(
+        positions: number[],
+        maxMembers: number,
+    ): number | null {
+        const used = new Set(positions);
+
+        for (let pos = 2; pos <= maxMembers; pos++) {
+            if (!used.has(pos)) return pos;
+        }
+
+        return null;
+    }
+
+    private async addMemberToLeaderGroupTx(
+        tx: Prisma.TransactionClient,
+        leaderUserId: number,
+        newUserId: number,
+    ): Promise<void> {
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            const { groupId, maxMembers } =
+                await this.getOrCreateOpenLeaderGroupTx(tx, leaderUserId);
+
+            const members = await tx.referralGroupMember.findMany({
+                where: { groupId },
+                select: { position: true },
+            });
+
+            const nextPosition = this.findNextFreePosition(
+                members.map((m) => m.position),
+                maxMembers,
+            );
+
+            if (!nextPosition) {
+                await tx.referralGroup.update({
+                    where: { id: groupId },
+                    data: { isClosed: true, closedAt: new Date() },
+                });
+                continue;
+            }
+
+            try {
+                await tx.referralGroupMember.create({
+                    data: {
+                        groupId,
+                        userId: newUserId,
+                        position: nextPosition,
+                    },
+                });
+
+                const count = await tx.referralGroupMember.count({
+                    where: { groupId },
+                });
+
+                if (count >= maxMembers) {
+                    await tx.referralGroup.update({
+                        where: { id: groupId },
+                        data: { isClosed: true, closedAt: new Date() },
+                    });
+                }
+
+                return;
+            } catch (error: any) {
+                if (error?.code === "P2002") {
+                    continue;
+                }
+                throw error;
+            }
+        }
+
+        throw new AppError(
+            "Não foi possível inserir usuário no grupo de indicação.",
+            409,
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // ATTACH REFERRAL NO CADASTRO
+    // ---------------------------------------------------------------------
+    public async attachReferralOnSignup(
+        input: AttachReferralOnSignupInput,
+    ): Promise<void> {
         const userId = Number(input.userId);
 
         if (!userId || Number.isNaN(userId)) {
             throw new AppError("userId inválido.", 400);
         }
 
-        const source: ReferralSource = input.source ?? "UNKNOWN";
-
-        // withIsDeleted=true para suportar cenários onde você quer bloquear mesmo se deletado (dependendo da regra)
         const user = await this.userRepository.findById(userId, true);
         if (!user) {
             throw new AppError("Usuário não encontrado.", 404);
         }
 
-        const hasAnyReferralInfo =
-            (Boolean(input.referrerId) && Number(input.referrerId) > 0) ||
+        const hasReferral =
+            Boolean(input.referrerId) ||
             Boolean((input.referralCode ?? "").trim());
 
-        if (!hasAnyReferralInfo) {
-            // Sem indicação: não faz nada
-            return;
+        if (!hasReferral) return;
+
+        if ((user as any).referrerId) {
+            throw new AppError("Usuário já possui referenciador.", 409);
         }
 
-        // Bloqueia se já existe vínculo rápido
-        if ((user as any).referrerId && (user as any).referrerId > 0) {
-            throw new AppError("Usuário já possui referenciador associado.", 409);
-        }
-
-        // Bloqueia se já existe auditoria formal de indicação recebida
-        const alreadyHasFormalReferral = await this.userRepository.hasReferralReceived(userId);
-        if (alreadyHasFormalReferral) {
+        const hasAudit = await this.userRepository.hasReferralReceived(userId);
+        if (hasAudit) {
             throw new AppError("Usuário já possui indicação registrada.", 409);
         }
 
         let referrer: User | null = null;
 
-        // 1) Se veio referrerId, resolve por ID
-        if (input.referrerId && input.referrerId > 0) {
-            referrer = await this.userRepository.findById(input.referrerId, false);
-
-            if (!referrer) {
-                throw new AppError("Referenciador não encontrado.", 404);
-            }
-
-            if ((referrer as any).status && (referrer as any).status !== "ACTIVE") {
-                throw new AppError("Referenciador inativo.", 400);
-            }
+        if (input.referrerId) {
+            referrer = await this.userRepository.findById(
+                input.referrerId,
+                false,
+            );
         }
 
-        // 2) Se não veio referrerId (ou não achou), resolve por referralCode
         if (!referrer) {
-            const code = (input.referralCode ?? "").trim();
-            referrer = await this.resolveReferrer(code);
-
-            if (!referrer) {
-                throw new AppError("Código de indicação inválido.", 404);
-            }
+            referrer = await this.resolveReferrer(
+                input.referralCode ?? "",
+            );
         }
 
-        // Auto-referral
+        if (!referrer) {
+            throw new AppError("Referenciador inválido.", 404);
+        }
+
         if ((referrer as any).id === userId) {
-            throw new AppError("Auto-indicação não é permitida.", 400);
+            throw new AppError("Auto-indicação não permitida.", 400);
         }
 
-        // Grava vínculo rápido (nível 1)
-        await this.userRepository.updateReferrerId(userId, (referrer as any).id);
+        const referrerId = Number((referrer as any).id);
 
-        // Grava auditoria formal (UserReferral)
-        const referralAudit: CreateUserReferralInput = {
-            referrerId: (referrer as any).id,
-            referredId: userId,
-            source,
-            deviceId: input.deviceId ?? null,
-            ip: input.ip ?? null,
-            userAgent: input.userAgent ?? null,
-            meta: input.meta,
-        };
+        await prisma.$transaction(async (tx) => {
+            await this.userRepository.updateReferrerId(userId, referrerId);
 
-        await this.userRepository.createUserReferral(referralAudit);
+            const audit: CreateUserReferralInput = {
+                referrerId,
+                referredId: userId,
+                source: input.source ?? "UNKNOWN",
+                deviceId: input.deviceId ?? null,
+                ip: input.ip ?? null,
+                userAgent: input.userAgent ?? null,
+                meta: this.normalizePrismaJsonMeta(input.meta) as any,
+            };
+
+            await this.userRepository.createUserReferral(audit);
+
+            await this.addMemberToLeaderGroupTx(tx, referrerId, userId);
+        });
+
+        // 🔥 DISPARA EVENTO ECONÔMICO
+        await this.onUserJoinedByReferral({ newUserId: userId });
     }
 }

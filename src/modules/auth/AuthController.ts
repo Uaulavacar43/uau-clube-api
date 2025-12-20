@@ -6,6 +6,9 @@ import type { RegisterUserDTO } from "./dto/RegisterUserDTO";
 export class AuthController {
 	constructor(private authService: AuthService) {}
 
+	/**
+	 * POST /auth/register
+	 */
 	public async register(
 		req: Request,
 		res: Response,
@@ -13,13 +16,23 @@ export class AuthController {
 	): Promise<void> {
 		try {
 			const data = res.locals as RegisterUserDTO;
-			const result = await this.authService.register(data); // Result incluye token, refreshToken y user
-			res.status(201).customJson(result); // Retorna token, refreshToken y user
+
+			const result = await this.authService.register(data);
+
+			res.status(201).customJson({
+				token: result.token,
+				refreshToken: result.refreshToken,
+				user: result.user,
+				referralLink: result.referralLink,
+			});
 		} catch (error) {
 			next(error);
 		}
 	}
 
+	/**
+	 * POST /auth/login
+	 */
 	public async login(
 		req: Request,
 		res: Response,
@@ -27,27 +40,17 @@ export class AuthController {
 	): Promise<void> {
 		try {
 			const data = res.locals as LoginUserDTO;
-			const result = await this.authService.login(data); // Result incluye token, refreshToken y user
-			res.status(200).customJson(result); // Retorna token, refreshToken y user
+			const result = await this.authService.login(data);
+
+			res.status(200).customJson(result);
 		} catch (error) {
 			next(error);
 		}
 	}
 
-	public async getFirebaseToken(
-		req: Request,
-		res: Response,
-		next: NextFunction,
-	): Promise<void> {
-		try {
-			const { id } = req.params;
-			const token = await this.authService.getFirebaseTokens(Number(id));
-			res.status(200).customJson({ firebaseToken: token });
-		} catch (error) {
-			next(error);
-		}
-	}
-
+	/**
+	 * POST /auth/refresh-token
+	 */
 	public async refreshToken(
 		req: Request,
 		res: Response,
@@ -56,6 +59,30 @@ export class AuthController {
 		try {
 			const { refreshToken } = req.body;
 			const result = await this.authService.refreshToken(refreshToken);
+
+			res.status(200).customJson(result);
+		} catch (error) {
+			next(error);
+		}
+	}
+
+	/**
+	 * GET /auth/referral-link
+	 * 🔗 Retorna o link de indicação do usuário logado
+	 */
+	public async getReferralLink(
+		req: Request,
+		res: Response,
+		next: NextFunction,
+	): Promise<void> {
+		try {
+			/**
+			 * Assume middleware de auth populando req.user
+			 */
+			const userId = Number((req as any).user?.id);
+
+			const result = await this.authService.getReferralLink(userId);
+
 			res.status(200).customJson(result);
 		} catch (error) {
 			next(error);
