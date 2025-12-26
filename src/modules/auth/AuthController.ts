@@ -4,7 +4,8 @@ import type { LoginUserDTO } from "./dto/LoginUserDTO";
 import type { RegisterUserDTO } from "./dto/RegisterUserDTO";
 
 export class AuthController {
-	constructor(private authService: AuthService) {}
+	constructor(private authService: AuthService) {
+	}
 
 	/**
 	 * POST /auth/register
@@ -57,7 +58,7 @@ export class AuthController {
 		next: NextFunction,
 	): Promise<void> {
 		try {
-			const { refreshToken } = req.body;
+			const {refreshToken} = req.body;
 			const result = await this.authService.refreshToken(refreshToken);
 
 			res.status(200).customJson(result);
@@ -76,10 +77,14 @@ export class AuthController {
 		next: NextFunction,
 	): Promise<void> {
 		try {
-			/**
-			 * Assume middleware de auth populando req.user
-			 */
-			const userId = Number((req as any).user?.id);
+			const userIdRaw = (req as any).user?.id;
+			const userId = Number(userIdRaw);
+
+			if (!userIdRaw || Number.isNaN(userId) || userId <= 0) {
+				// 401 é o correto se não tem user no request
+				res.status(401).customJson({message: "Unauthorized"});
+				return;
+			}
 
 			const result = await this.authService.getReferralLink(userId);
 
