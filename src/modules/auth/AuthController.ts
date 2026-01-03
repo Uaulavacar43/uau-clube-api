@@ -67,6 +67,7 @@ export class AuthController {
 		}
 	}
 
+
 	/**
 	 * GET /auth/referral-link
 	 * 🔗 Retorna o link de indicação do usuário logado
@@ -77,20 +78,30 @@ export class AuthController {
 		next: NextFunction,
 	): Promise<void> {
 		try {
-			const userIdRaw = (req as any).user?.id;
-			const userId = Number(userIdRaw);
+			const userId = Number((req as any).user?.id);
 
-			if (!userIdRaw || Number.isNaN(userId) || userId <= 0) {
-				// 401 é o correto se não tem user no request
-				res.status(401).customJson({message: "Unauthorized"});
-				return;
+			// 1) tenta env
+			let baseUrl = (process.env.APP_BASE_URL ?? '').trim();
+
+			// 2) fallback: tenta montar pela request (bom quando APP_BASE_URL não tá setada)
+			if (!baseUrl) {
+				const xfProto = (req.get('x-forwarded-proto') ?? '').split(',')[0].trim();
+				const xfHost = (req.get('x-forwarded-host') ?? '').split(',')[0].trim();
+				const host = xfHost || req.get('host') || '';
+
+				const proto = xfProto || (req.protocol || 'https');
+
+				if (host) {
+					baseUrl = `${proto}://${host}`;
+				}
 			}
 
-			const result = await this.authService.getReferralLink(userId);
+			const result = await this.authService.getReferralLink(userId, baseUrl);
 
 			res.status(200).customJson(result);
 		} catch (error) {
 			next(error);
 		}
 	}
+
 }

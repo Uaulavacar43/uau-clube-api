@@ -1,12 +1,10 @@
 // src/modules/payment/services/CouponPricingService.ts
 
-
 import { PaymentPolicy } from "./PaymentPolicy";
 import type { AsaasDiscountPayload, AsaasDiscountType } from "./AsaasBillingService";
-import {ICouponRepository} from "../../repositories/interfaces/ICouponRepository";
-import {AppError} from "../../error/AppError";
-import {Coupon} from "../../entities/Coupon";
-
+import { ICouponRepository } from "../../repositories/interfaces/ICouponRepository";
+import { AppError } from "../../error/AppError";
+import { Coupon } from "../../entities/Coupon";
 
 export type CouponPricingResult = {
     finalAmount: number;

@@ -1,12 +1,11 @@
 // src/modules/payment/services/CashbackService.ts
 
-
 import { AppError } from "../../error/AppError";
 
 import prisma from "../../config/dbConfig";
 import { TransactionSource, TransactionType, WalletType } from "@prisma/client";
 
-import {PaymentPolicy} from "./PaymentPolicy";
+import { PaymentPolicy } from "./PaymentPolicy";
 
 /**
  * Serviço responsável por regras de Cashback (FASE 4):
@@ -20,7 +19,7 @@ import {PaymentPolicy} from "./PaymentPolicy";
  * IMPORTANTE:
  * Este serviço foi extraído do PaymentService e deve manter a lógica 100% idêntica.
  */
-export class CashbackService {
+export class PaymentCashbackService {
     public async computeCashbackAvailability(
         userId: number,
         now: Date,
@@ -132,10 +131,7 @@ export class CashbackService {
             PaymentPolicy.MINIMUM_CHARGE_AMOUNT,
         );
 
-        const amountAfterCoupon = PaymentPolicy.ensureMinimumAmount(
-            params.amountAfterCoupon,
-            minCharge,
-        );
+        const amountAfterCoupon = PaymentPolicy.ensureMinimumAmount(params.amountAfterCoupon, minCharge);
 
         if (requested <= 0) {
             return {
@@ -173,11 +169,7 @@ export class CashbackService {
             };
         }
 
-        const cashbackUsed = Math.min(
-            availability.availableBalance,
-            requested,
-            maxAllowed,
-        );
+        const cashbackUsed = Math.min(availability.availableBalance, requested, maxAllowed);
 
         if (cashbackUsed <= 0) {
             return {
@@ -288,10 +280,7 @@ export class CashbackService {
             }
 
             if (walletBalance < amountToDebit) {
-                throw new AppError(
-                    "Saldo de wallet insuficiente para debitar no pagamento confirmado",
-                    409,
-                );
+                throw new AppError("Saldo de wallet insuficiente para debitar no pagamento confirmado", 409);
             }
 
             await tx.cashbackWallet.update({
@@ -319,6 +308,161 @@ export class CashbackService {
                     expiresAt: null,
                 },
             });
+        });
+    }
+
+    // =====================================================================
+    // MÉTODOS QUE COSTUMAM FALTAR AO EXTRAIR DO PaymentService
+    // =====================================================================
+
+    /**
+     * Crédito idempotente de cashback (EARNED) no PAID:
+     * - Incrementa wallet INTERNAL
+     * - Cria CashbackTransaction.EARNED com expiresAt opcional
+     * - Usa eventKey único por paymentIdAsaas (idempotência)
+     *
+     * IMPORTANTE:
+     * - Não fixei TransactionSource porque depende do teu enum no schema.prisma.
+     *   Você passa o `source` existente no seu projeto (ex.: SUBSCRIPTION_CREDIT, SUBSCRIPTION_EARN, etc.)
+     */
+    public async creditCashbackEarnedIdempotentOnPaid(params: {
+        userId: number;
+        amount: number;
+        paymentIdAsaas: string;
+        paymentIdLocal?: number | null;
+        source: TransactionSource;
+        expiresAt?: Date | null;
+        meta?: Record<string, any>;
+    }): Promise<void> {
+        const amountToCredit = PaymentPolicy.parseCashbackAmount(params.amount);
+        if (amountToCredit <= 0) return;
+
+        const eventKey = `CASHBACK_EARN:ASAAS_PAYMENT:${params.paymentIdAsaas}`;
+
+        await prisma.$transaction(async (tx) => {
+            const wallet = await tx.cashbackWallet.upsert({
+                where: {
+                    userId_type: {
+                        userId: params.userId,
+                        type: WalletType.INTERNAL,
+                    },
+                },
+                update: {},
+                create: {
+                    userId: params.userId,
+                    type: WalletType.INTERNAL,
+                    balance: 0,
+                },
+                select: {
+                    id: true,
+                    balance: true,
+                },
+            });
+
+            const existingTx = await tx.cashbackTransaction.findUnique({
+                where: { eventKey },
+                select: { id: true },
+            });
+
+            if (existingTx) {
+                return;
+            }
+
+            await tx.cashbackWallet.update({
+                where: { id: wallet.id },
+                data: {
+                    balance: {
+                        increment: amountToCredit,
+                    },
+                },
+            });
+
+            await tx.cashbackTransaction.create({
+                data: {
+                    userId: params.userId,
+                    type: TransactionType.EARNED,
+                    source: params.source,
+                    amount: amountToCredit,
+                    relatedId: params.paymentIdAsaas,
+                    eventKey,
+                    meta: {
+                        paymentIdLocal: params.paymentIdLocal ?? null,
+                        paymentIdAsaas: params.paymentIdAsaas,
+                        ...(params.meta ?? {}),
+                    },
+                    expiresAt: params.expiresAt ?? null,
+                },
+            });
+        });
+    }
+
+    /**
+     * (Opcional, mas MUITO útil) Rebuild do saldo da wallet INTERNAL a partir
+     * das transações:
+     * - balance = SUM(EARNED) - SUM(USED)
+     * - respeita expiração no cálculo (só EARNED não expirado entra)
+     *
+     * Use isso pra “corrigir bug” quando wallet divergir das transações.
+     */
+    public async rebuildInternalWalletBalanceFromTransactions(params: {
+        userId: number;
+        now?: Date;
+    }): Promise<{ walletId: number; newBalance: number }> {
+        const now = params.now ?? new Date();
+
+        return await prisma.$transaction(async (tx) => {
+            const wallet = await tx.cashbackWallet.upsert({
+                where: {
+                    userId_type: {
+                        userId: params.userId,
+                        type: WalletType.INTERNAL,
+                    },
+                },
+                update: {},
+                create: {
+                    userId: params.userId,
+                    type: WalletType.INTERNAL,
+                    balance: 0,
+                },
+                select: {
+                    id: true,
+                },
+            });
+
+            const rows = await tx.cashbackTransaction.findMany({
+                where: { userId: params.userId },
+                select: {
+                    type: true,
+                    amount: true,
+                    expiresAt: true,
+                },
+            });
+
+            let earnedValid = 0;
+            let usedTotal = 0;
+
+            for (const r of rows) {
+                const a = Number(r.amount ?? 0);
+
+                if (r.type === TransactionType.EARNED) {
+                    const expiresAt = r.expiresAt ? new Date(r.expiresAt) : null;
+                    const isExpired = expiresAt ? expiresAt.getTime() <= now.getTime() : false;
+                    if (!isExpired) earnedValid += a;
+                }
+
+                if (r.type === TransactionType.USED) {
+                    usedTotal += a;
+                }
+            }
+
+            const newBalance = Math.max(0, Number((earnedValid - usedTotal).toFixed(2)));
+
+            await tx.cashbackWallet.update({
+                where: { id: wallet.id },
+                data: { balance: newBalance },
+            });
+
+            return { walletId: wallet.id, newBalance };
         });
     }
 }

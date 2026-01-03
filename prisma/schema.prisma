@@ -411,6 +411,7 @@ model Car {
   dailyWashes   DailyWash[]
   subscriptions Subscription[]
 
+  @@unique([licensePlate, userId]) // ✅ REGRA CORRETA
   @@index([licensePlate])
   @@schema("public")
 }

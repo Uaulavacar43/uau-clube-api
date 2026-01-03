@@ -32,6 +32,46 @@ export class AuthService {
 	private static readonly WELCOME_BONUS_AMOUNT = 20;
 
 	/**
+	 * Resolve a base do app para montar links.
+	 * - Preferência: argumento `appBaseUrl` (quando controller quiser passar)
+	 * - Fallback: process.env.APP_BASE_URL
+	 * - Sanitiza: trim, remove barra final, evita "undefined"
+	 */
+	private resolveAppBaseUrl(appBaseUrl?: string): string | null {
+		const raw =
+			typeof appBaseUrl === "string" && appBaseUrl.trim()
+				? appBaseUrl.trim()
+				: (process.env.APP_BASE_URL ?? "").trim();
+
+		if (!raw) return null;
+
+		// Evita configuração ruim tipo APP_BASE_URL=undefined
+		if (raw === "undefined" || raw.startsWith("undefined/") || raw.includes("://undefined")) {
+			return null;
+		}
+
+		// Remove "/" no final
+		const normalized = raw.replace(/\/+$/, "").trim();
+		return normalized || null;
+	}
+
+	/**
+	 * Monta o link SEMPRE sem retornar "undefined/...".
+	 * Se APP_BASE_URL não estiver configurado, retorna link relativo (front consegue prefixar pelo origin).
+	 */
+	private buildReferralLink(referralCode: string, appBaseUrl?: string): string {
+		const base = this.resolveAppBaseUrl(appBaseUrl);
+		const encoded = encodeURIComponent(referralCode);
+
+		if (base) {
+			return `${base}/cadastro?ref=${encoded}`;
+		}
+
+		// fallback seguro (não vira "undefined/...")
+		return `/cadastro?ref=${encoded}`;
+	}
+
+	/**
 	 * 🎁 WELCOME BONUS = CASHBACK (20 REAIS)
 	 * Idempotente via eventKey
 	 */
@@ -118,10 +158,7 @@ export class AuthService {
 		/**
 		 * 🔑 referralCode imutável
 		 */
-		const referralCode = crypto
-			.randomUUID()
-			.replace(/-/g, "")
-			.slice(0, 8);
+		const referralCode = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
 
 		/**
 		 * 1️⃣ CRIA USUÁRIO
@@ -160,16 +197,14 @@ export class AuthService {
 			};
 
 			const strictReferral =
-				(process.env.REFERRALS_STRICT_ON_REGISTER ?? "true")
-					.toLowerCase() === "true";
+				(process.env.REFERRALS_STRICT_ON_REGISTER ?? "true").toLowerCase() === "true";
 
 			try {
-				const attachResult =
-					await this.userRepository.attachReferralOnSignup({
-						referredId: user.id,
-						referralCode: referrerCode,
-						context,
-					});
+				const attachResult = await this.userRepository.attachReferralOnSignup({
+					referredId: user.id,
+					referralCode: referrerCode,
+					context,
+				});
 
 				if (!attachResult.attached && strictReferral) {
 					throw new AppError("Código de indicação inválido", 400);
@@ -190,10 +225,7 @@ export class AuthService {
 		/**
 		 * 4️⃣ TOKENS
 		 */
-		const token = signToken(
-			{ id: user.id, role: user.role },
-			this.accessTokenExpiry,
-		);
+		const token = signToken({ id: user.id, role: user.role }, this.accessTokenExpiry);
 
 		const refreshToken = signToken(
 			{ id: user.id, role: user.role },
@@ -201,9 +233,9 @@ export class AuthService {
 		);
 
 		/**
-		 * 🔗 LINK DE INDICAÇÃO
+		 * 🔗 LINK DE INDICAÇÃO (nunca retorna "undefined/...")
 		 */
-		const referralLink = `${process.env.APP_BASE_URL}/cadastro?ref=${referralCode}`;
+		const referralLink = this.buildReferralLink(referralCode);
 
 		return { token, refreshToken, user, referralLink };
 	}
@@ -223,10 +255,7 @@ export class AuthService {
 			throw new AppError("Credenciais inválidas", 401);
 		}
 
-		const token = signToken(
-			{ id: user.id, role: user.role },
-			this.accessTokenExpiry,
-		);
+		const token = signToken({ id: user.id, role: user.role }, this.accessTokenExpiry);
 
 		const refreshToken = signToken(
 			{ id: user.id, role: user.role },
@@ -241,10 +270,7 @@ export class AuthService {
 	): Promise<{ token: string; refreshToken: string }> {
 		const payload = verifyToken(refreshToken);
 
-		const token = signToken(
-			{ id: payload.id, role: payload.role },
-			this.accessTokenExpiry,
-		);
+		const token = signToken({ id: payload.id, role: payload.role }, this.accessTokenExpiry);
 
 		const newRefreshToken = signToken(
 			{ id: payload.id, role: payload.role },
@@ -253,8 +279,19 @@ export class AuthService {
 
 		return { token, refreshToken: newRefreshToken };
 	}
+
+	/**
+	 * GET /auth/referral-link
+	 * 🔗 Retorna o link de indicação do usuário logado.
+	 *
+	 * Observação:
+	 * - Se APP_BASE_URL estiver ausente, retorna link relativo (ex: "/cadastro?ref=ABC123"),
+	 *   evitando "undefined/...".
+	 * - Se você quiser montar absolutão via request, passe `appBaseUrl` pelo controller.
+	 */
 	public async getReferralLink(
 		userId: number,
+		appBaseUrl?: string,
 	): Promise<{ referralCode: string; referralLink: string }> {
 		const user = await this.userRepository.findById(userId);
 
@@ -262,12 +299,11 @@ export class AuthService {
 			throw new AppError("Usuário ou código de indicação não encontrado", 404);
 		}
 
-		const referralLink = `${process.env.APP_BASE_URL}/cadastro?ref=${user.referralCode}`;
+		const referralLink = this.buildReferralLink(user.referralCode, appBaseUrl);
 
 		return {
 			referralCode: user.referralCode,
 			referralLink,
 		};
 	}
-
 }

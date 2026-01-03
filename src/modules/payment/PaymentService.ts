@@ -24,10 +24,7 @@ import {
     asaasGetPixQrCode,
 } from "../../utils/asaas/asaasPayments";
 import { asaasGetOrCreateRandomPixKey } from "../../utils/asaas/asaasPixKeys";
-import {
-    asaasCreateSubscription,
-    asaasListSubscriptionPayments,
-} from "../../utils/asaas/asaasSubscriptions";
+import { asaasCreateSubscription } from "../../utils/asaas/asaasSubscriptions";
 import {
     ASAASPaymentBillingTypeEnum,
     ASAASPaymentStatusEnum,
@@ -48,11 +45,8 @@ import { ReferralBonusService } from "../referrals/ReferralBonusService";
 
 /**
  * ---------------------------------------------------------------------
- * Tipos internos para MODIFIERS do ASAAS (Fase 4 pronta)
+ * Tipos internos para desconto (cupom) e cashback (regra 50% + mínimo)
  * ---------------------------------------------------------------------
- *
- * - discount: usado para cupom + cashback (Fase 4)
- * - fine/interest: previstos para fase 4+ (sem refatorar depois)
  */
 type AsaasDiscountType = "PERCENTAGE" | "FIXED";
 
@@ -62,22 +56,6 @@ type AsaasDiscountPayload = {
     type: AsaasDiscountType;
 };
 
-type AsaasFineType = "PERCENTAGE" | "FIXED";
-type AsaasFinePayload = {
-    value: number;
-    type: AsaasFineType;
-};
-
-type AsaasInterestPayload = {
-    value: number;
-};
-
-type AsaasBillingModifiers = {
-    discount?: AsaasDiscountPayload;
-    fine?: AsaasFinePayload;
-    interest?: AsaasInterestPayload;
-};
-
 // Para tipar payloads diretamente a partir das funções util (evita “type: string”)
 type AsaasCreatePaymentPayload = Parameters<typeof asaasCreatePayment>[0];
 
@@ -85,6 +63,13 @@ type CouponPricingResult = {
     finalAmount: number;
     asaasDiscount?: AsaasDiscountPayload;
     appliedDiscountValue: number;
+};
+
+type CashbackUsageResult = {
+    cashbackUsed: number;
+    amountAfterCashback: number;
+    wallet: { id: number; balance: number };
+    availableBalance: number;
 };
 
 /**
@@ -308,6 +293,57 @@ export class PaymentService {
         return clamped;
     }
 
+    private normalizeMoney(value: unknown): number {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return 0;
+        if (n <= 0) return 0;
+        return Number(n.toFixed(2));
+    }
+
+    private parseCashbackAmount(input: unknown): number {
+        return this.normalizeMoney(input);
+    }
+
+    /**
+     * Para PLANO RECORRENTE (assinatura ASAAS):
+     * - nextDueDate precisa ir para o PRÓXIMO CICLO
+     * - e a 1ª mensalidade é uma cobrança avulsa "agora"
+     *
+     * Aqui calculamos o próximo vencimento baseado na periodicidade.
+     */
+    private calculateNextSubscriptionDueDate(plan: Plan, referenceDate: Date): Date {
+        const base = new Date(referenceDate.getTime());
+
+        switch (plan.periodicityType) {
+            case PeriodicityType.WEEK:
+                base.setDate(base.getDate() + 7);
+                break;
+
+            case PeriodicityType.MONTH:
+                base.setMonth(base.getMonth() + 1);
+                break;
+
+            case PeriodicityType.QUARTERLY:
+                base.setMonth(base.getMonth() + 3);
+                break;
+
+            case PeriodicityType.SEMIANNUALLY:
+                base.setMonth(base.getMonth() + 6);
+                break;
+
+            case PeriodicityType.YEAR:
+                base.setFullYear(base.getFullYear() + 1);
+                break;
+
+            default:
+                // fallback conservador
+                base.setMonth(base.getMonth() + 1);
+                break;
+        }
+
+        return base;
+    }
+
     // ---------------------------------------------------------------------
     // EXTERNAL REFERENCE (ASAAS) - compact encode/decode + retrocompat JSON
     // ---------------------------------------------------------------------
@@ -458,17 +494,6 @@ export class PaymentService {
     // FASE 4: Helpers de Cashback (saldo disponível com expiração + regra 50%)
     // ---------------------------------------------------------------------
 
-    private normalizeMoney(value: unknown): number {
-        const n = Number(value);
-        if (!Number.isFinite(n)) return 0;
-        if (n <= 0) return 0;
-        return Number(n.toFixed(2));
-    }
-
-    private parseCashbackAmount(input: unknown): number {
-        return this.normalizeMoney(input);
-    }
-
     private async computeCashbackAvailability(userId: number, now: Date): Promise<{
         earnedValid: number;
         earnedExpired: number;
@@ -564,12 +589,7 @@ export class PaymentService {
         requestedCashback: number;
         amountAfterCoupon: number; // total após cupom, antes do cashback
         minimumCharge: number;
-    }): Promise<{
-        cashbackUsed: number;
-        amountAfterCashback: number;
-        wallet: { id: number; balance: number };
-        availableBalance: number;
-    }> {
+    }): Promise<CashbackUsageResult> {
         const requested = this.parseCashbackAmount(params.requestedCashback);
 
         const minCharge = this.ensureMinimumAmount(
@@ -765,22 +785,6 @@ export class PaymentService {
     }
 
     // ---------------------------------------------------------------------
-    // Helper para montar “modifiers” do ASAAS
-    // ---------------------------------------------------------------------
-
-    private buildAsaasBillingModifiers(
-        mod: AsaasBillingModifiers,
-    ): Partial<AsaasBillingModifiers> {
-        const out: AsaasBillingModifiers = {};
-
-        if (mod.discount) out.discount = mod.discount;
-        if (mod.fine) out.fine = mod.fine;
-        if (mod.interest) out.interest = mod.interest;
-
-        return out;
-    }
-
-    // ---------------------------------------------------------------------
     // REGRA DE CUPOM (mínimo a pagar) + valor aplicado
     // ---------------------------------------------------------------------
 
@@ -865,41 +869,6 @@ export class PaymentService {
                 type: "FIXED",
             },
             appliedDiscountValue: Number(appliedDiscount.toFixed(2)),
-        };
-    }
-
-    private buildCombinedAsaasDiscountFixed(params: {
-        baseAmount: number;
-        appliedCouponDiscountValue: number;
-        cashbackUsed: number;
-        minimumCharge: number;
-    }): AsaasDiscountPayload | undefined {
-        const base = Number(params.baseAmount) || 0;
-        if (base <= 0) return undefined;
-
-        const totalDiscount = Number(
-            (
-                Number(params.appliedCouponDiscountValue || 0) +
-                Number(params.cashbackUsed || 0)
-            ).toFixed(2),
-        );
-
-        if (!Number.isFinite(totalDiscount) || totalDiscount <= 0) {
-            return undefined;
-        }
-
-        const minCharge = this.ensureMinimumAmount(params.minimumCharge);
-
-        const maxAllowedDiscount = Math.max(0, base - minCharge);
-        if (maxAllowedDiscount <= 0) return undefined;
-
-        const applied = Math.min(totalDiscount, maxAllowedDiscount);
-
-        if (applied <= 0) return undefined;
-
-        return {
-            value: Number(applied.toFixed(2)),
-            type: "FIXED",
         };
     }
 
@@ -994,12 +963,18 @@ export class PaymentService {
                 ? ASAASPaymentBillingTypeEnum.PIX
                 : ASAASPaymentBillingTypeEnum.CREDIT_CARD;
 
+        const creditCardCustomerName =
+            this.normalizeOptionalString(creditCardHolderInfo?.name);
+
+        const creditCardCustomerEmail =
+            this.normalizeOptionalString(creditCardHolderInfo?.email);
+
         const customerName =
-            this.normalizeOptionalString(creditCardHolderInfo?.name) ??
+            creditCardCustomerName ??
             this.normalizeOptionalString((loggedUser as any)?.name);
 
         const customerEmail =
-            this.normalizeOptionalString(creditCardHolderInfo?.email) ??
+            creditCardCustomerEmail ??
             this.normalizeOptionalString((loggedUser as any)?.email);
 
         if (!customerName) {
@@ -1033,17 +1008,6 @@ export class PaymentService {
             await asaasGetOrCreateRandomPixKey();
         }
 
-        const combinedDiscount = this.buildCombinedAsaasDiscountFixed({
-            baseAmount,
-            appliedCouponDiscountValue: pricing.appliedDiscountValue,
-            cashbackUsed: cashbackPricing.cashbackUsed,
-            minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
-        });
-
-        const modifiers = this.buildAsaasBillingModifiers({
-            discount: combinedDiscount,
-        });
-
         // ✅ Padroniza “data do dia” com timezone (evita virar o dia por UTC)
         const timeZoneOffsetMinutes = this.resolveTimeZoneOffsetMinutes(
             (data as any)?.timeZoneOffsetMinutes ?? (data as any)?.timeZoneOffset,
@@ -1065,16 +1029,21 @@ export class PaymentService {
             timeZoneOffsetMinutes,
         });
 
+        // ✅ PIX/Checkout avulso: ASAAS recebe value FINAL (após cupom + cashback)
+        const finalChargeAmount = this.ensureMinimumAmount(
+            cashbackPricing.amountAfterCashback,
+            PaymentService.MINIMUM_CHARGE_AMOUNT,
+        );
+
         const asaasPaymentPayload: AsaasCreatePaymentPayload = {
             billingType,
             dueDate: dueDateStr,
-            value: baseAmount,
+            value: finalChargeAmount,
             customer: asaasCustomer.id,
             description: `Pagamento serviços avulsos: ${services
                 .map((s) => s.name)
                 .join(", ")}`,
             externalReference,
-            ...modifiers,
         };
 
         if (billingType === ASAASPaymentBillingTypeEnum.CREDIT_CARD) {
@@ -1109,7 +1078,7 @@ export class PaymentService {
             status: internalStatusFromAsaas,
             couponId: coupon?.id ?? null,
             paymentDate: agora,
-            dueAt, // FASE 4: novo campo
+            dueAt, // FASE 4
             pixQrCode,
             pixPayload,
             createdAt: agora,
@@ -1301,8 +1270,6 @@ export class PaymentService {
             notificationDisabled: false,
         });
 
-        console.log("[subscribeToPlan] Criando assinatura em formato de PACOTE...");
-
         const timeZoneOffsetMinutes = this.resolveTimeZoneOffsetMinutes(
             (data as any)?.timeZoneOffsetMinutes ?? (data as any)?.timeZoneOffset,
             -180,
@@ -1361,17 +1328,6 @@ export class PaymentService {
                 }),
             );
 
-            const combinedDiscount = this.buildCombinedAsaasDiscountFixed({
-                baseAmount: plan.price,
-                appliedCouponDiscountValue: planCouponPricing.appliedDiscountValue,
-                cashbackUsed: cashbackPricing.cashbackUsed,
-                minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
-            });
-
-            const modifiers = this.buildAsaasBillingModifiers({
-                discount: combinedDiscount,
-            });
-
             const externalReference = this.buildAsaasExternalReference({
                 userId,
                 couponId: coupon?.id,
@@ -1384,10 +1340,17 @@ export class PaymentService {
                 timeZoneOffsetMinutes,
             });
 
+            // ✅ PIX para PACOTE FECHADO:
+            // ASAAS recebe `value`/`totalValue` = valor FINAL (após cupom + cashback)
+            const safeFinalAmount = this.ensureMinimumAmount(
+                cashbackPricing.amountAfterCashback,
+                PaymentService.MINIMUM_CHARGE_AMOUNT,
+            );
+
             const asaasPaymentPayload: AsaasCreatePaymentPayload = {
                 billingType: billingPaymentType,
                 dueDate: this.isoDateString(dateWithTimeZone),
-                value: plan.price,
+                value: safeFinalAmount,
                 installmentCount:
                     plan.periodicityType !== PeriodicityType.MONTH &&
                     (data as any)?.installments &&
@@ -1398,12 +1361,11 @@ export class PaymentService {
                     plan.periodicityType !== PeriodicityType.MONTH &&
                     (data as any)?.installments &&
                     (data as any)?.installments > 1
-                        ? plan.price
+                        ? safeFinalAmount
                         : undefined,
                 customer: asaasCustomer.id,
                 description: `Pagamento plano no formato PACOTE: ${plan.name}`,
                 externalReference,
-                ...modifiers,
             };
 
             if (billingPaymentType === ASAASPaymentBillingTypeEnum.CREDIT_CARD) {
@@ -1435,11 +1397,6 @@ export class PaymentService {
                 console.log("[subscribeToPlan] QR code PIX recuperado.");
             }
 
-            const safeFinalAmount = this.ensureMinimumAmount(
-                cashbackPricing.amountAfterCashback,
-                PaymentService.MINIMUM_CHARGE_AMOUNT,
-            );
-
             const payment = await this.paymentRepository.create({
                 id: 0,
                 userId,
@@ -1451,7 +1408,9 @@ export class PaymentService {
                         ? (data as any)?.installments ?? null
                         : null,
                 paymentDate: dateWithTimeZone,
-                dueAt: this.parseIsoDateToDate(this.isoDateString(dateWithTimeZone)) ?? dateWithTimeZone,
+                dueAt:
+                    this.parseIsoDateToDate(this.isoDateString(dateWithTimeZone)) ??
+                    dateWithTimeZone,
                 createdAt: dateWithTimeZone,
                 updatedAt: dateWithTimeZone,
                 paymentIdAsaas: asaasPayment.id,
@@ -1487,8 +1446,17 @@ export class PaymentService {
             };
         }
 
+        // -----------------------------------------------------------------
+        // ✅ PLANO RECORRENTE (ASSINATURA ASAAS) - CORREÇÃO PRINCIPAL
+        //
+        // REGRA:
+        // 1) Criar assinatura ASAAS com valor cheio e nextDueDate no PRÓXIMO ciclo
+        // 2) Criar cobrança avulsa AGORA (1ª mensalidade) com cashback/cupom abatidos
+        //
+        // Isso garante que o desconto vale só "esse mês" e NÃO contamina os próximos.
+        // -----------------------------------------------------------------
         console.log(
-            "[subscribeToPlan] Plano NÃO é pacote. Criando assinatura ASAAS recorrente...",
+            "[subscribeToPlan] Plano NÃO é pacote. Criando assinatura ASAAS recorrente (valor cheio + nextDueDate próximo ciclo) + cobrança avulsa (1ª mensalidade com desconto)...",
         );
 
         const { subscription, payment } = await this.createAsaasSubscription(
@@ -1500,6 +1468,13 @@ export class PaymentService {
             asaasCustomer.id,
             coupon,
             billingSubscriptionType,
+            {
+                startDate: dateWithTimeZone,
+                timeZoneOffsetMinutes,
+                requestedCashback,
+                planCouponPricing,
+                cashbackPricing,
+            },
         );
 
         if (!subscription) {
@@ -1992,6 +1967,13 @@ export class PaymentService {
         customerId: string,
         coupon: Coupon | null,
         billingType: ASAASSubscriptionBillingTypeEnum,
+        pricing: {
+            startDate: Date;
+            timeZoneOffsetMinutes: number;
+            requestedCashback: number;
+            planCouponPricing: CouponPricingResult;
+            cashbackPricing: CashbackUsageResult;
+        },
     ): Promise<{
         subscription: Subscription;
         payment: Payment | null;
@@ -2001,14 +1983,8 @@ export class PaymentService {
                 [
                     [PeriodicityType.WEEK, ASAASSubscriptionCycleEnum.WEEKLY],
                     [PeriodicityType.MONTH, ASAASSubscriptionCycleEnum.MONTHLY],
-                    [
-                        PeriodicityType.QUARTERLY,
-                        ASAASSubscriptionCycleEnum.QUARTERLY,
-                    ],
-                    [
-                        PeriodicityType.SEMIANNUALLY,
-                        ASAASSubscriptionCycleEnum.SEMIANNUALLY,
-                    ],
+                    [PeriodicityType.QUARTERLY, ASAASSubscriptionCycleEnum.QUARTERLY],
+                    [PeriodicityType.SEMIANNUALLY, ASAASSubscriptionCycleEnum.SEMIANNUALLY],
                     [PeriodicityType.YEAR, ASAASSubscriptionCycleEnum.YEARLY],
                 ],
             );
@@ -2044,15 +2020,13 @@ export class PaymentService {
                 }
             }
 
-            const timeZoneOffsetMinutes = this.resolveTimeZoneOffsetMinutes(
-                (data as any)?.timeZoneOffsetMinutes ?? (data as any)?.timeZoneOffset,
-                -180,
-            );
-            const startDate = new Date();
-            startDate.setMinutes(startDate.getMinutes() + timeZoneOffsetMinutes);
+            // ✅ Usa a data/timezone já calculadas no fluxo principal
+            const startDate = pricing.startDate;
+            const timeZoneOffsetMinutes = pricing.timeZoneOffsetMinutes;
 
             const expiresAt = this.calculatePlanExpiration(plan, startDate);
 
+            // 1) Cria assinatura local (SUSPENDED até pagamento da 1ª mensalidade)
             const localSubscriptionRaw = await this.subscriptionRepository.create(
                 new Subscription({
                     userId: data.userId,
@@ -2064,7 +2038,7 @@ export class PaymentService {
                     carId: (data as any)?.carId,
                     paymentMethod: billingType,
                     subscriptionIdAsaas: null,
-                    couponId: coupon?.id ?? null,
+                    couponId: coupon?.id ?? null, // registro interno (cupom aplicado na 1ª cobrança avulsa)
                     expiresAt,
                     subscriptionStatus: "SUSPENDED",
                     endDate: null,
@@ -2074,53 +2048,28 @@ export class PaymentService {
             const localSubscription =
                 this.hydrateSubscription(localSubscriptionRaw);
 
-            const planCouponPricing = this.applyCouponWithMinimumCharge(
-                plan.price,
-                coupon,
-                PaymentService.MINIMUM_CHARGE_AMOUNT,
-            );
+            // 2) Cria assinatura ASAAS com VALOR CHEIO e nextDueDate no PRÓXIMO ciclo
+            const nextDueDate = this.calculateNextSubscriptionDueDate(plan, startDate);
 
-            const requestedCashback = this.parseCashbackAmount((data as any)?.cashbackAmount);
-
-            const cashbackPricing = await this.resolveCashbackUsageOrThrow({
-                userId: data.userId,
-                requestedCashback,
-                amountAfterCoupon: planCouponPricing.finalAmount,
-                minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
-            });
-
-            const combinedDiscount = this.buildCombinedAsaasDiscountFixed({
-                baseAmount: plan.price,
-                appliedCouponDiscountValue: planCouponPricing.appliedDiscountValue,
-                cashbackUsed: cashbackPricing.cashbackUsed,
-                minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
-            });
-
-            const modifiers = this.buildAsaasBillingModifiers({
-                discount: combinedDiscount,
-            });
-
-            const externalReference = this.buildAsaasExternalReference({
+            // ⚠️ IMPORTANTE:
+            // externalReference da ASSINATURA NÃO deve carregar cashback/cupom,
+            // senão o webhook pode "contaminar" pagamentos futuros.
+            const subscriptionExternalReference = this.buildAsaasExternalReference({
                 userId: data.userId,
                 planId: plan.id,
-                couponId: coupon?.id,
                 subId: localSubscription.id,
-                cashbackUsedAmount: cashbackPricing.cashbackUsed,
-                cashbackBaseAmount: planCouponPricing.finalAmount,
-                cashbackRequestedAmount: requestedCashback,
                 minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
                 timeZoneOffsetMinutes,
             });
 
             const payload: ASAASCreateSubscriptionDTO = {
                 customer: customerId,
-                nextDueDate: this.isoDateString(startDate),
-                value: plan.price,
+                nextDueDate: this.isoDateString(nextDueDate),
+                value: plan.price, // valor cheio sempre
                 billingType,
                 cycle,
                 description: `Plano recorrente: ${plan.name}`,
-                externalReference,
-                ...modifiers,
+                externalReference: subscriptionExternalReference,
             } as ASAASCreateSubscriptionDTO;
 
             if (billingType === ASAASSubscriptionBillingTypeEnum.CREDIT_CARD) {
@@ -2128,7 +2077,7 @@ export class PaymentService {
                 (payload as any).creditCardHolderInfo = creditCardHolderInfo;
             }
 
-            console.log("[createAsaasSubscription] Criando assinatura no Asaas...");
+            console.log("[createAsaasSubscription] Criando assinatura no Asaas (valor cheio + nextDueDate próximo ciclo)...");
             const asaasSubscription = await asaasCreateSubscription(
                 payload,
                 customerId,
@@ -2143,55 +2092,67 @@ export class PaymentService {
             );
 
             console.log(
-                `[createAsaasSubscription] Assinatura Asaas ${asaasSubscription.id} vinculada ao ID local ${localSubscription.id}.`,
+                `[createAsaasSubscription] Assinatura Asaas ${asaasSubscription.id} vinculada ao ID local ${localSubscription.id}. nextDueDate=${this.isoDateString(nextDueDate)}`,
             );
 
-            console.log(
-                "[createAsaasSubscription] Tentando recuperar a primeira cobrança (ID pay_...).",
+            // 3) Cria a cobrança avulsa AGORA (1ª mensalidade) com cashback/cupom abatidos
+            const paymentBillingType =
+                billingType === ASAASSubscriptionBillingTypeEnum.PIX
+                    ? ASAASPaymentBillingTypeEnum.PIX
+                    : ASAASPaymentBillingTypeEnum.CREDIT_CARD;
+
+            const safeFinalAmount = this.ensureMinimumAmount(
+                pricing.cashbackPricing.amountAfterCashback,
+                PaymentService.MINIMUM_CHARGE_AMOUNT,
             );
-            const paymentList = await asaasListSubscriptionPayments(
-                asaasSubscription.id,
-            );
 
-            const firstPaymentAsaas = paymentList.data[0];
+            const firstDueDateStr = this.isoDateString(startDate);
+            const firstDueAt = this.parseIsoDateToDate(firstDueDateStr) ?? startDate;
 
-            if (!firstPaymentAsaas) {
-                console.warn(
-                    "[createAsaasSubscription] ALERTA: Cobrança não encontrada imediatamente. O Webhook irá criar o registro de Payment e ativar o PIX/Cartão.",
-                );
+            // Aqui o externalReference do PAGAMENTO AVULSO pode carregar cashback/cupom
+            // porque é só essa cobrança (não afeta os próximos ciclos).
+            const firstPaymentExternalReference = this.buildAsaasExternalReference({
+                userId: data.userId,
+                planId: plan.id,
+                subId: localSubscription.id,
+                couponId: coupon?.id,
+                cashbackUsedAmount: pricing.cashbackPricing.cashbackUsed,
+                cashbackBaseAmount: pricing.planCouponPricing.finalAmount, // base após cupom
+                cashbackRequestedAmount: pricing.requestedCashback,
+                minimumCharge: PaymentService.MINIMUM_CHARGE_AMOUNT,
+                timeZoneOffsetMinutes,
+            });
 
-                return {
-                    subscription: localSubscription,
-                    payment: null,
-                };
+            const firstPaymentPayload: AsaasCreatePaymentPayload = {
+                billingType: paymentBillingType,
+                dueDate: firstDueDateStr,
+                value: safeFinalAmount,
+                customer: customerId,
+                description: `1ª mensalidade (cashback/cupom aplicado): ${plan.name}`,
+                externalReference: firstPaymentExternalReference,
+            };
+
+            if (paymentBillingType === ASAASPaymentBillingTypeEnum.CREDIT_CARD) {
+                (firstPaymentPayload as any).creditCard = creditCard;
+                (firstPaymentPayload as any).creditCardHolderInfo = creditCardHolderInfo;
             }
 
-            console.log(
-                `[createAsaasSubscription] Cobrança recuperada: ${firstPaymentAsaas.id} (Status: ${firstPaymentAsaas.status})`,
-            );
+            console.log("[createAsaasSubscription] Criando cobrança avulsa da 1ª mensalidade (com desconto)...");
+            const asaasFirstPayment = await asaasCreatePayment(firstPaymentPayload);
 
             let pixQrCode: string | null = null;
             let pixPayload: string | null = null;
 
-            if (billingType === ASAASSubscriptionBillingTypeEnum.PIX) {
-                console.log("[createAsaasSubscription] Recuperando QR code PIX...");
-                const asaasPixCode = await asaasGetPixQrCode(
-                    firstPaymentAsaas.id,
-                );
+            if (paymentBillingType === ASAASPaymentBillingTypeEnum.PIX) {
+                console.log("[createAsaasSubscription] Recuperando QR code PIX da 1ª mensalidade...");
+                const asaasPixCode = await asaasGetPixQrCode(asaasFirstPayment.id);
                 pixQrCode = asaasPixCode.encodedImage;
                 pixPayload = asaasPixCode.payload;
-                console.log(
-                    "[createAsaasSubscription] QR code PIX recuperado e pronto para o cliente.",
-                );
+                console.log("[createAsaasSubscription] QR code PIX recuperado e pronto para o cliente.");
             }
 
             const internalStatus = this.mapAsaasPaymentStatusToInternal(
-                firstPaymentAsaas.status as ASAASPaymentStatusEnum,
-            );
-
-            const safeFinalAmount = this.ensureMinimumAmount(
-                cashbackPricing.amountAfterCashback,
-                PaymentService.MINIMUM_CHARGE_AMOUNT,
+                asaasFirstPayment.status as ASAASPaymentStatusEnum,
             );
 
             const dbPayment = await this.paymentRepository.create({
@@ -2201,22 +2162,24 @@ export class PaymentService {
                 couponId: coupon?.id ?? null,
                 amount: safeFinalAmount,
                 status: internalStatus,
-                paymentMethodId: billingType.toString(),
-                paymentIdAsaas: firstPaymentAsaas.id,
+                paymentMethodId: paymentBillingType.toString(),
+                paymentIdAsaas: asaasFirstPayment.id,
                 paymentDate: startDate,
-                dueAt: this.parseIsoDateToDate(this.isoDateString(startDate)) ?? startDate,
+                dueAt: firstDueAt,
                 createdAt: startDate,
                 updatedAt: startDate,
                 pixQrCode,
                 pixPayload,
                 installments: null,
                 cashbackUsedAmount:
-                    cashbackPricing.cashbackUsed > 0 ? cashbackPricing.cashbackUsed : null,
+                    pricing.cashbackPricing.cashbackUsed > 0
+                        ? pricing.cashbackPricing.cashbackUsed
+                        : null,
             } as any);
 
             if (internalStatus === "PAID") {
                 console.log(
-                    "[createAsaasSubscription] Pagamento APROVADO IMEDIATAMENTE. Ativando assinatura local.",
+                    "[createAsaasSubscription] 1ª mensalidade APROVADA IMEDIATAMENTE. Ativando assinatura local.",
                 );
                 await this.updateSubscriptionValidityFromPayment(
                     localSubscription,
@@ -2429,16 +2392,17 @@ export class PaymentService {
                 return { status: 200, message: "ID de pagamento não encontrado" };
             }
 
-            // ⚠️ NÃO usar isso como fonte de verdade do amount quando há discount/modifiers.
+            // ⚠️ NÃO usar isso como fonte de verdade do amount quando há discount/cashback.
+            // Para 1ª mensalidade avulsa, usamos externalReference com base/cashback.
+            // Para mensalidades futuras (da assinatura), o externalReference NÃO terá base/cashback,
+            // então o webhookValue será a fonte final.
             const webhookValue = Number(body.payment.value) || 0;
 
-            // ✅ Agora é LET: pode ser preenchido no fallback do ASAAS
             let paymentDate =
                 body.payment.paymentDate !== undefined && body.payment.paymentDate !== null
                     ? new Date(body.payment.paymentDate)
                     : new Date();
 
-            // ✅ Agora é LET: pode ser preenchido no fallback do ASAAS
             let dueAtFromBody =
                 (body.payment as any)?.dueDate !== undefined && (body.payment as any)?.dueDate !== null
                     ? this.parseIsoDateToDate((body.payment as any)?.dueDate)
@@ -2452,13 +2416,9 @@ export class PaymentService {
             let cashbackUsedAmount: number | undefined;
             let cashbackBaseAmount: number | undefined;
 
-            // ✅ novo: timezone para competência/recorrência
             let timeZoneOffsetMinutes: number | undefined;
-
-            // ✅ novo: mínimo para clamp no webhook (vem do externalReference)
             let minimumCharge: number | undefined;
 
-            // Mantém um objeto parseado (para recalcular amount corretamente)
             let parsedExternalReference:
                 | {
                 userId?: number;
@@ -2555,11 +2515,8 @@ export class PaymentService {
                 }
             }
 
-            // ✅ Busca existingPayment ANTES do cálculo do amount (pra poder preservar amount local se necessário)
             const existingPayment = await this.paymentRepository.getByAsaasId(paymentAsaasId);
 
-            // ✅ Se ainda faltar vínculo (ou quiser enriquecer dados), consulta ASAAS
-            // OBS: não exigimos planId para pagamentos avulsos, mas a consulta pode preencher dados legados.
             if (!userId || (!planId && planId !== 0)) {
                 try {
                     console.log(
@@ -2581,7 +2538,6 @@ export class PaymentService {
                     const asaasPaymentRaw = await asaasGetPayment(paymentAsaasId);
                     const asaasPayment = asaasPaymentRaw as AsaasPaymentLike;
 
-                    // ✅ Se o webhook veio sem paymentDate, tenta preencher do ASAAS
                     if (
                         (body.payment.paymentDate === undefined || body.payment.paymentDate === null) &&
                         asaasPayment.paymentDate
@@ -2590,7 +2546,6 @@ export class PaymentService {
                         paymentDate = new Date(asaasPayment.paymentDate);
                     }
 
-                    // ✅ Se o webhook veio sem dueDate, tenta preencher do ASAAS
                     if (!dueAtFromBody && asaasPayment.dueDate) {
                         (body.payment as any).dueDate = asaasPayment.dueDate;
                         dueAtFromBody = this.parseIsoDateToDate(asaasPayment.dueDate);
@@ -2710,10 +2665,9 @@ export class PaymentService {
                 }
             }
 
-            // ✅ CORREÇÃO PRINCIPAL:
-            // amount precisa refletir o valor final (após cupom + cashback),
-            // calculado a partir do externalReference (cashbackBaseAmount - cashbackUsedAmount),
-            // e com clamp mínimo (minimumCharge).
+            // ✅ amount FINAL:
+            // - Se externalReference tiver base/cashback (1ª mensalidade avulsa), usa computed.
+            // - Se não tiver (mensalidades futuras da assinatura), cai para webhookValue.
             const amount = this.resolveFinalAmountFromExternalReference({
                 webhookValue,
                 existingAmount: (existingPayment as any)?.amount,
@@ -3200,7 +3154,7 @@ export class PaymentService {
         const baseAfterCoupon = this.normalizeMoney(ext?.cashbackBaseAmount);
         const cashbackUsed = this.parseCashbackAmount(ext?.cashbackUsedAmount);
 
-        // ✅ Fonte de verdade: externalReference (cashbackBaseAmount - cashbackUsedAmount)
+        // ✅ Fonte de verdade: externalReference (baseAfterCoupon - cashbackUsed) quando disponível (1ª mensalidade avulsa)
         if (baseAfterCoupon > 0) {
             const computed = baseAfterCoupon - cashbackUsed;
             return this.ensureMinimumAmount(computed, minCharge);
@@ -3212,7 +3166,7 @@ export class PaymentService {
             return this.ensureMinimumAmount(existing, minCharge);
         }
 
-        // ✅ Último fallback: usa o valor do webhook
+        // ✅ Último fallback: usa o valor do webhook (mensalidades futuras da assinatura)
         const webhookValue = this.normalizeMoney(params.webhookValue);
         return this.ensureMinimumAmount(webhookValue, minCharge);
     }

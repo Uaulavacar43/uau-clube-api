@@ -20,9 +20,33 @@ export class CashbackService {
     // HELPERS (regras centrais)
     // ------------------------------------------------------------------
 
+    /**
+     * Normaliza valores monetários vindos do Prisma/DTOs (number | string | Decimal).
+     * - Garante number finito
+     * - Arredonda para 2 casas
+     * - Não permite negativos (cashback é sempre >= 0)
+     */
+    private normalizeMoney(value: unknown): number {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return 0;
+        if (n <= 0) return 0;
+        return Number(n.toFixed(2));
+    }
+
+    private toDate(value: unknown): Date | null {
+        if (!value) return null;
+        if (value instanceof Date) {
+            return Number.isNaN(value.getTime()) ? null : value;
+        }
+
+        const d = new Date(value as any);
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+
     private isExpired(tx: CashbackTransaction, now: Date): boolean {
-        if (!tx.expiresAt) return false;
-        return tx.expiresAt.getTime() <= now.getTime();
+        const expiresAt = this.toDate((tx as any)?.expiresAt);
+        if (!expiresAt) return false;
+        return expiresAt.getTime() <= now.getTime();
     }
 
     private async computeBalance(userId: number, now: Date): Promise<{
@@ -39,18 +63,24 @@ export class CashbackService {
         let usedTotal = 0;
 
         for (const tx of all) {
+            const amount = this.normalizeMoney((tx as any)?.amount);
+
             if (tx.type === TransactionType.EARNED) {
-                if (this.isExpired(tx, now)) earnedExpired += tx.amount;
-                else earnedValid += tx.amount;
+                if (this.isExpired(tx, now)) earnedExpired += amount;
+                else earnedValid += amount;
             }
 
             if (tx.type === TransactionType.USED) {
-                usedTotal += tx.amount;
+                usedTotal += amount;
             }
         }
 
+        earnedValid = Number(earnedValid.toFixed(2));
+        earnedExpired = Number(earnedExpired.toFixed(2));
+        usedTotal = Number(usedTotal.toFixed(2));
+
         const rawAvailable = earnedValid - usedTotal;
-        const availableBalance = rawAvailable < 0 ? 0 : rawAvailable;
+        const availableBalance = rawAvailable < 0 ? 0 : Number(rawAvailable.toFixed(2));
 
         return {
             earnedValid,
@@ -74,6 +104,11 @@ export class CashbackService {
             throw new AppError("ReferralBonus sem eventKey.", 500);
         }
 
+        const amount = this.normalizeMoney((bonus as any)?.amount);
+        if (amount <= 0) {
+            throw new AppError("ReferralBonus com amount inválido.", 400);
+        }
+
         const exists = await this.txRepo.existsByEventKey(bonus.eventKey);
         if (exists) return;
 
@@ -83,7 +118,7 @@ export class CashbackService {
             userId: bonus.receiverId,
             type: TransactionType.EARNED,
             source: TransactionSource.INDICATION,
-            amount: bonus.amount,
+            amount,
             relatedId: String(bonus.id),
             eventKey: bonus.eventKey,
             meta: {
@@ -95,7 +130,7 @@ export class CashbackService {
             expiresAt: null,
         });
 
-        await this.walletRepo.incrementBalance(wallet.id, bonus.amount);
+        await this.walletRepo.incrementBalance(wallet.id, amount);
     }
 
     // ------------------------------------------------------------------
@@ -107,8 +142,9 @@ export class CashbackService {
         amount: number;
         validDays?: number;
     }): Promise<void> {
-        const { userId, amount } = params;
+        const { userId } = params;
 
+        const amount = this.normalizeMoney(params.amount);
         if (amount <= 0) {
             throw new AppError("Welcome bonus inválido.", 400);
         }
@@ -138,10 +174,10 @@ export class CashbackService {
             userId: dto.userId,
             type: dto.type,
             source: dto.source,
-            amount: dto.amount,
+            amount: this.normalizeMoney(dto.amount),
             relatedId: dto.relatedId,
             eventKey: dto.eventKey,
-            meta: dto.meta,              // undefined se não tiver
+            meta: dto.meta, // undefined se não tiver
             expiresAt: dto.expiresAt,
         });
 
@@ -202,7 +238,19 @@ export class CashbackService {
     // ------------------------------------------------------------------
 
     public async debitForPayment(dto: DebitCashbackDTO): Promise<number> {
-        const { userId, paymentId, requestedAmount, paymentTotal } = dto;
+        const userId = Number((dto as any)?.userId);
+        const paymentId = Number((dto as any)?.paymentId);
+
+        const requestedAmount = this.normalizeMoney((dto as any)?.requestedAmount);
+        const paymentTotal = this.normalizeMoney((dto as any)?.paymentTotal);
+
+        if (!Number.isFinite(userId) || userId <= 0) {
+            throw new AppError("userId inválido para débito de cashback.", 400);
+        }
+
+        if (!Number.isFinite(paymentId) || paymentId <= 0) {
+            throw new AppError("paymentId inválido para débito de cashback.", 400);
+        }
 
         if (requestedAmount <= 0) return 0;
 
@@ -216,8 +264,10 @@ export class CashbackService {
         const now = new Date();
         const { availableBalance, allTransactions } = await this.computeBalance(userId, now);
 
-        const maxAllowed = paymentTotal * 0.5;
-        const allowed = Math.min(requestedAmount, availableBalance, maxAllowed);
+        const maxAllowed = Number((paymentTotal * 0.5).toFixed(2));
+        const allowed = Number(
+            Math.min(requestedAmount, availableBalance, maxAllowed).toFixed(2),
+        );
 
         if (allowed <= 0) return 0;
 
@@ -226,7 +276,7 @@ export class CashbackService {
         const alreadyUsed = await this.txRepo.existsByEventKey(eventKey);
         if (alreadyUsed) {
             const existing = allTransactions.find((t) => t.eventKey === eventKey);
-            return existing?.amount ?? 0;
+            return this.normalizeMoney((existing as any)?.amount);
         }
 
         await this.txRepo.create({
