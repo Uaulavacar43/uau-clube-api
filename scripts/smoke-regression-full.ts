@@ -18,6 +18,12 @@
  * - Cleanup: remove TODOS os cashbackTransactions/cashbackWallets do usuário seed (não só os ids criados),
  *   e limpa dependências comuns em ordem para evitar FK.
  * - fetch: usa global fetch se existir; senão tenta node-fetch (best-effort).
+ *
+ * FIX (2026-01-04):
+ * - Corrige P2002 cpf: admin e user estavam gerando o MESMO CPF porque a função cortava em 9 dígitos
+ *   e a diferença do sufixo ("1"/"2") ficava fora. Agora:
+ *   1) CPF vem de um hash (seedBase) => admin/user sempre diferentes
+ *   2) garante CPF único no banco antes do create (loop best-effort)
  */
 
 import * as crypto from "crypto";
@@ -171,15 +177,9 @@ function isAuthErrorStatus(status: number): boolean {
     return status === 401 || status === 403;
 }
 
-/**
- * Corrigido:
- * - Evita erro de tipagem quando TS usa lib.dom e setTimeout retorna `number`.
- * - Não usa `.unref?.()` diretamente no retorno de setTimeout.
- */
 function withTimeout(ms: number): AbortController {
     const ac = new AbortController();
-    const t: any = setTimeout(() => ac.abort(), ms);
-    if (t && typeof t.unref === "function") t.unref();
+    setTimeout(() => ac.abort(), ms).unref?.();
     return ac;
 }
 
@@ -412,15 +412,10 @@ async function httpGetWithAuthFallback(params: {
         return Object.assign(r, { tried });
     }
 
-    const fallback: HttpResult = last ?? {
-        ok: false,
-        status: 0,
-        url: params.url,
-        method: "GET",
-        text: "no_response",
-    };
-
-    return Object.assign(fallback, { tried });
+    return Object.assign(
+        last ?? { ok: false, status: 0, url: params.url, method: "GET", text: "no_response" },
+        { tried },
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -477,7 +472,7 @@ async function hashPasswordCompat(plain: string): Promise<string> {
 }
 
 // -----------------------------------------------------------------------------
-// CPF válido
+// CPF válido (corrigido: hash + unicidade best-effort)
 // -----------------------------------------------------------------------------
 
 function onlyDigits(s: string): string {
@@ -491,13 +486,47 @@ function calcCpfDigit(base: number[], factor: number): number {
     return mod < 2 ? 0 : 11 - mod;
 }
 
-function generateValidCpf(runId: string): string {
-    const seed = onlyDigits(runId).padEnd(9, "7").slice(0, 9);
-    const base = seed.split("").map((c) => Number(c));
-    while (base.length < 9) base.push(Math.floor(Math.random() * 10));
+/**
+ * Gera CPF válido a partir de um seed (hash), evitando o bug anterior em que
+ * admin/user poderiam gerar o MESMO CPF por causa de slice(0,9) em dígitos.
+ */
+function generateValidCpfFromSeed(seed: string): string {
+    const hash = crypto.createHash("sha256").update(seed).digest();
+
+    const base: number[] = [];
+    for (let i = 0; i < 9; i++) base.push(hash[i] % 10);
+
+    // evita CPFs inválidos triviais (todos iguais)
+    const allEqual = base.every((d) => d === base[0]);
+    if (allEqual) base[8] = (base[8] + 1) % 10;
+
     const d1 = calcCpfDigit(base, 10);
     const d2 = calcCpfDigit([...base, d1], 11);
     return [...base, d1, d2].join("");
+}
+
+/**
+ * Garante CPF único no banco antes do create (best-effort).
+ * Só chama isso quando o model User tem campo cpf.
+ */
+async function generateUniqueCpfForUser(seedBase: string): Promise<string> {
+    // tenta várias combinações determinísticas pelo seedBase
+    for (let i = 0; i < 60; i++) {
+        const candidate = generateValidCpfFromSeed(`${seedBase}#${i}`);
+        try {
+            const existing = await (prisma as any).user.findFirst({
+                where: { cpf: candidate },
+                select: { id: true },
+            });
+            if (!existing?.id) return candidate;
+        } catch {
+            // se por algum motivo a query falhar, continua tentando outras seeds
+        }
+    }
+
+    // fallback randômico (extremamente improvável colidir)
+    const rnd = crypto.randomBytes(10).toString("hex");
+    return generateValidCpfFromSeed(`${seedBase}#fallback#${rnd}`);
 }
 
 // -----------------------------------------------------------------------------
@@ -510,7 +539,7 @@ function toLetters(s: string): string {
 }
 
 function toDigits(s: string): string {
-    const digits = (s ?? "").replace(/\D/g, "");
+    const digits = onlyDigits(s);
     return digits || "1234567";
 }
 
@@ -666,23 +695,12 @@ function dummyValueForField(params: {
         if (lname.includes("eventkey")) return `SMOKE:${seedTag}:${runId}`;
         if (lname.includes("referral") && lname.includes("code"))
             return crypto.randomBytes(4).toString("hex");
-        if (lname === "cpf") return generateValidCpf(runId);
+        if (lname === "cpf") return generateValidCpfFromSeed(`${seedTag}:${runId}:${field.name}`);
         return `SMOKE_${seedTag}_${runId}_${field.name}`;
     }
 
     if (t === "Int") return 1;
-
-    /**
-     * Corrigido:
-     * - Evita depender do símbolo `BigInt` existir na lib do TS.
-     * - Usa globalThis.BigInt quando disponível; senão, cai pra number (best-effort).
-     */
-    if (t === "BigInt") {
-        const bi = (globalThis as any)?.BigInt;
-        if (typeof bi === "function") return bi(1);
-        return 1;
-    }
-
+    if (t === "BigInt") return BigInt(1);
     if (t === "Float" || t === "Decimal") return 1;
     if (t === "Boolean") return true;
     if (t === "DateTime") return new Date();
@@ -800,7 +818,6 @@ async function seedUserOrReuse(params: {
 
     const email = `smoke.${params.seedTag}.${params.runId}@example.com`;
     const passwordPlain = `smoke_${params.seedTag}_${params.runId}_pass`;
-    const cpf = generateValidCpf(params.runId + (params.seedTag === "admin" ? "1" : "2"));
 
     const referralCodeFieldExists = fieldExists(userModel, "referralCode");
     const referralCode = referralCodeFieldExists ? generateReferralCodeLikeAuthService() : null;
@@ -827,13 +844,19 @@ async function seedUserOrReuse(params: {
         else roleValue = params.rolePreferred[0] ?? "USER";
     }
 
+    // CPF (corrigido): gera determinístico por seedTag + runId e garante unicidade antes do create
+    let cpf: string | null = null;
+    if (fieldExists(userModel, "cpf")) {
+        cpf = await generateUniqueCpfForUser(`${params.runId}:${params.seedTag}`);
+    }
+
     const hashedPassword = await hashPasswordCompat(passwordPlain);
 
     const overrides: Record<string, unknown> = {
         ...(fieldExists(userModel, "name") ? { name: `Smoke ${params.seedTag} ${params.runId}` } : {}),
         ...(fieldExists(userModel, "email") ? { email } : {}),
         ...(fieldExists(userModel, "phone") ? { phone: `85${params.runId.slice(0, 8)}` } : {}),
-        ...(fieldExists(userModel, "cpf") ? { cpf } : {}),
+        ...(fieldExists(userModel, "cpf") && cpf ? { cpf } : {}),
         ...(fieldExists(userModel, "role") && roleValue ? { role: roleValue } : {}),
         ...(referralCodeFieldExists && referralCode ? { referralCode } : {}),
     };
@@ -854,27 +877,54 @@ async function seedUserOrReuse(params: {
         overrides,
     });
 
-    const created = await (prisma as any).user.create({
-        data,
-        select: { id: true, ...(referralCodeFieldExists ? { referralCode: true } : {}) },
-    });
+    // se mesmo assim colidir (muito raro), faz retry gerando outro CPF
+    try {
+        const created = await (prisma as any).user.create({
+            data,
+            select: { id: true, ...(referralCodeFieldExists ? { referralCode: true } : {}) },
+        });
 
-    const createdReferralCode =
-        referralCodeFieldExists && typeof created?.referralCode === "string"
-            ? created.referralCode
-            : referralCode;
+        const createdReferralCode =
+            referralCodeFieldExists && typeof created?.referralCode === "string"
+                ? created.referralCode
+                : referralCode;
 
-    if (referralCodeFieldExists && (!createdReferralCode || String(createdReferralCode).trim().length < 6)) {
-        const rc = generateReferralCodeLikeAuthService();
-        try {
-            await (prisma as any).user.update({ where: { id: created.id }, data: { referralCode: rc } });
-            return { id: created.id, email, passwordPlain, referralCode: rc };
-        } catch {
-            return { id: created.id, email, passwordPlain, referralCode: createdReferralCode ?? null };
+        if (referralCodeFieldExists && (!createdReferralCode || String(createdReferralCode).trim().length < 6)) {
+            const rc = generateReferralCodeLikeAuthService();
+            try {
+                await (prisma as any).user.update({ where: { id: created.id }, data: { referralCode: rc } });
+                return { id: created.id, email, passwordPlain, referralCode: rc };
+            } catch {
+                return { id: created.id, email, passwordPlain, referralCode: createdReferralCode ?? null };
+            }
         }
-    }
 
-    return { id: created.id, email, passwordPlain, referralCode: createdReferralCode ?? null };
+        return { id: created.id, email, passwordPlain, referralCode: createdReferralCode ?? null };
+    } catch (e: any) {
+        // Prisma P2002 em cpf: retry com CPF novo
+        if (String(e?.code) === "P2002" && Array.isArray(e?.meta?.target) && e.meta.target.includes("cpf")) {
+            if (fieldExists(userModel, "cpf")) {
+                const cpfRetry = await generateUniqueCpfForUser(`${params.runId}:${params.seedTag}:retry:${crypto.randomBytes(6).toString("hex")}`);
+                const dataRetry = {
+                    ...data,
+                    cpf: cpfRetry,
+                };
+
+                const createdRetry = await (prisma as any).user.create({
+                    data: dataRetry,
+                    select: { id: true, ...(referralCodeFieldExists ? { referralCode: true } : {}) },
+                });
+
+                const createdReferralCode =
+                    referralCodeFieldExists && typeof createdRetry?.referralCode === "string"
+                        ? createdRetry.referralCode
+                        : referralCode;
+
+                return { id: createdRetry.id, email, passwordPlain, referralCode: createdReferralCode ?? null };
+            }
+        }
+        throw e;
+    }
 }
 
 async function loginBestEffort(baseUrl: string, email: string, password: string): Promise<string | null> {
@@ -1169,10 +1219,15 @@ async function seedPaymentsDbOnly(params: {
             ...(fieldExists(paymentModel, "createdAt") ? { createdAt: new Date() } : {}),
             ...(fieldExists(paymentModel, "updatedAt") ? { updatedAt: new Date() } : {}),
             ...(fieldExists(paymentModel, "paymentMethodId") ? { paymentMethodId: "PIX" } : {}),
+            ...(fieldExists(paymentModel, "installments") ? { installments: null } : {}),
+            ...(fieldExists(paymentModel, "pixQrCode") ? { pixQrCode: null } : {}),
+            ...(fieldExists(paymentModel, "pixPayload") ? { pixPayload: null } : {}),
+            ...(fieldExists(paymentModel, "couponId") ? { couponId: null } : {}),
+            ...(fieldExists(paymentModel, "planId") ? { planId: null } : {}),
         };
 
         if (fieldExists(paymentModel, "cashbackUsedAmount")) {
-            overrides.cashbackUsedAmount = i % 2 === 0 ? Number((i * 0.75).toFixed(2)) : undefined;
+            overrides.cashbackUsedAmount = i % 2 === 0 ? Number((i * 0.75).toFixed(2)) : null;
         }
 
         const data = buildCreateDataForModel({
@@ -1359,13 +1414,16 @@ async function adminUsersProbeAndCrud(params: {
     ensureOkOrThrow(opts, getRes, `ADMIN_USERS_GET_BY_ID GET /users/${userIdToGet}`);
     if (getRes.ok) logTag("ADMIN_USERS_GET_BY_ID", `GET /users/${userIdToGet} -> ${getRes.status}`);
 
+    const cpf1 = generateValidCpfFromSeed(`api-create:${runId}:user:${crypto.randomBytes(6).toString("hex")}`);
+    const cpf2 = generateValidCpfFromSeed(`api-create:${runId}:admin:${crypto.randomBytes(6).toString("hex")}`);
+
     const createBodyCandidates = [
         {
             name: `Smoke Created ${runId}`,
             email: `smoke.created.${runId}@example.com`,
             password: `smoke_created_${runId}_pass`,
             phone: `85${runId.slice(0, 8)}`,
-            cpf: generateValidCpf(runId + "9"),
+            cpf: cpf1,
             role: "USER",
         },
         {
@@ -1373,7 +1431,7 @@ async function adminUsersProbeAndCrud(params: {
             email: `smoke.created.${runId}@example.com`,
             password: `smoke_created_${runId}_pass`,
             phone: `85${runId.slice(0, 8)}`,
-            cpf: generateValidCpf(runId + "8"),
+            cpf: cpf2,
             role: "ADMIN",
         },
     ];
