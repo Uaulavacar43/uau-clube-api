@@ -24,6 +24,14 @@
  *   e a diferença do sufixo ("1"/"2") ficava fora. Agora:
  *   1) CPF vem de um hash (seedBase) => admin/user sempre diferentes
  *   2) garante CPF único no banco antes do create (loop best-effort)
+ *
+ * FIX (2026-01-04):
+ * - Para de "adivinhar" endpoints em DAILY_WASH e COUPONS_VALIDATE. Agora usa as rotas reais:
+ *   DAILY_WASH:
+ *     - GET /daily-wash/availability (auth)
+ *     - GET /daily-wash/user/:userId/history (auth)
+ *   COUPONS_VALIDATE:
+ *     - GET /coupons/validate/:code (público)
  */
 
 import * as crypto from "crypto";
@@ -1502,8 +1510,66 @@ async function adminUsersProbeAndCrud(params: {
 }
 
 // -----------------------------------------------------------------------------
-// Coupons validate
+// Coupons validate (rota real: GET /coupons/validate/:code)
 // -----------------------------------------------------------------------------
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function extractCouponCodeFromObject(obj: Record<string, unknown>): string | null {
+    const directKeys = ["code", "couponCode", "coupon_code", "coupon"];
+    for (const k of directKeys) {
+        const v = obj[k];
+        if (typeof v === "string" && v.trim().length >= 2) return v.trim();
+    }
+    return null;
+}
+
+function extractFirstCouponCodeDeep(value: unknown, depth = 0): string | null {
+    if (depth > 6) return null;
+
+    if (typeof value === "string") return null;
+    if (typeof value === "number" || typeof value === "boolean" || value == null) return null;
+
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const found = extractFirstCouponCodeDeep(item, depth + 1);
+            if (found) return found;
+        }
+        return null;
+    }
+
+    if (isRecord(value)) {
+        const direct = extractCouponCodeFromObject(value);
+        if (direct) return direct;
+
+        // shapes comuns
+        const candidates = [
+            value.data,
+            value.items,
+            value.results,
+            value.result,
+            value.payload,
+            value.content,
+            value.coupons,
+            value.list,
+        ];
+
+        for (const c of candidates) {
+            const found = extractFirstCouponCodeDeep(c, depth + 1);
+            if (found) return found;
+        }
+
+        // fallback: varre todas as props
+        for (const v of Object.values(value)) {
+            const found = extractFirstCouponCodeDeep(v, depth + 1);
+            if (found) return found;
+        }
+    }
+
+    return null;
+}
 
 async function couponsProbe(params: {
     opts: SmokeOptions;
@@ -1523,50 +1589,37 @@ async function couponsProbe(params: {
 
     if (!list.ok) return;
 
-    const code = "SMOKE";
-    const validateCandidates = ["/coupons/validate", "/coupons/validate-coupon", "/coupons/check"];
+    // Extrai um code REAL da listagem (sem adivinhar endpoints nem payloads).
+    const code = extractFirstCouponCodeDeep(list.json);
 
-    const validatePost = await probePostFirstOk({
-        opts,
-        baseUrl,
-        token,
-        label: "COUPONS_VALIDATE_POST",
-        candidates: validateCandidates,
-        bodies: [{ code }, { coupon: code }, { couponCode: code }],
-    });
-
-    if (validatePost.ok) {
-        logTag("OK", "coupons validate POST");
+    if (!code) {
+        warnTag(
+            "COUPONS_VALIDATE",
+            "não foi possível extrair um coupon code da resposta de GET /coupons; não dá pra validar sem um code real (best-effort).",
+        );
+        logTag("OK", "coupons probe");
         return;
     }
 
-    let anyOk = false;
-    for (const c of validateCandidates) {
-        const urls = [
-            buildUrl(baseUrl, c, { code }),
-            buildUrl(baseUrl, c, { coupon: code }),
-            buildUrl(baseUrl, c, { couponCode: code }),
-        ];
+    // Rota REAL (pública) conforme teu router: GET /coupons/validate/:code
+    const path = `/coupons/validate/${encodeURIComponent(code)}`;
+    const url = `${baseUrl}${path}`;
 
-        for (const url of urls) {
-            const r = await httpJson({ method: "GET", url, token: token ?? undefined, authMode: token ? "bearer" : "none" });
-            if (isNotFoundStatus(r.status) || isMethodNotAllowed(r.status)) continue;
+    const r = await httpJson({
+        method: "GET",
+        url,
+        authMode: "none", // rota pública
+    });
 
-            if (!r.ok) {
-                ensureOkOrThrow(opts, r, `COUPONS_VALIDATE_GET GET ${new URL(url).pathname}`);
-                anyOk = false;
-                break;
-            }
-
-            logTag("COUPONS_VALIDATE_GET", `GET ${new URL(url).pathname}${new URL(url).search} -> ${r.status}`);
-            anyOk = true;
-            break;
-        }
-
-        if (anyOk) break;
+    if (isNotFoundStatus(r.status) || isMethodNotAllowed(r.status)) {
+        // se chegou aqui com 404/405, significa que o backend não está montando a rota como no router
+        ensureOkOrThrow(opts, r, `COUPONS_VALIDATE_GET GET ${path}`);
+        logTag("OK", "coupons probe");
+        return;
     }
 
-    if (!anyOk) warnTag("COUPONS_VALIDATE", "nenhum endpoint candidato respondeu (404/405) ou validou (best-effort).");
+    ensureOkOrThrow(opts, r, `COUPONS_VALIDATE_GET GET ${path}`);
+    if (r.ok) logTag("COUPONS_VALIDATE_GET", `GET ${path} -> ${r.status} (public)`);
 
     logTag("OK", "coupons probe");
 }
@@ -1975,18 +2028,49 @@ async function main(): Promise<void> {
         return true;
     });
 
-    // DAILY WASH
+    // DAILY WASH (rota real, sem "adivinhar")
     await runStep(opts, "daily-wash", async () => {
-        const r = await probeGetFirstOk({
-            opts,
-            baseUrl: opts.baseUrl,
-            token: ctx.userToken ?? ctx.adminToken,
-            label: "DAILY_WASH",
-            candidates: ["/daily-wash", "/daily-wash/list", "/daily-wash/all"],
-            retryWithAdminToken: ctx.adminToken,
+        const token = ctx.userToken ?? ctx.adminToken;
+
+        if (!token) {
+            warnTag("DAILY_WASH", "sem token (skip)");
+            logTag("OK", "daily-wash probe");
+            return true;
+        }
+
+        // ROTA REAL: GET /daily-wash/availability
+        const availabilityPath = "/daily-wash/availability";
+        const availabilityRes = await httpGetWithAuthFallback({
+            url: `${opts.baseUrl}${availabilityPath}`,
+            token,
+            timeoutMs: 20_000,
         });
-        if (!r.ok) warnTag("DAILY_WASH", "nenhum endpoint candidato respondeu (404/405).");
-        logTag("OK", "daily-wash GET");
+
+        ensureOkOrThrow(opts, availabilityRes, `DAILY_WASH_AVAILABILITY GET ${availabilityPath}`);
+        if (availabilityRes.ok) {
+            logTag(
+                "DAILY_WASH_AVAILABILITY",
+                `GET ${availabilityPath} -> ${availabilityRes.status} (auth=${availabilityRes.tried.join(",")})`,
+            );
+        }
+
+        // ROTA REAL: GET /daily-wash/user/:userId/history
+        const historyPath = `/daily-wash/user/${ctx.userId}/history`;
+        const historyRes = await httpGetWithAuthFallback({
+            url: `${opts.baseUrl}${historyPath}`,
+            token,
+            timeoutMs: 20_000,
+        });
+
+        ensureOkOrThrow(opts, historyRes, `DAILY_WASH_HISTORY GET ${historyPath}`);
+        if (historyRes.ok) {
+            logTag(
+                "DAILY_WASH_HISTORY",
+                `GET ${historyPath} -> ${historyRes.status} (auth=${historyRes.tried.join(",")})`,
+            );
+        }
+
+        logTag("OK", "daily-wash probe");
         return true;
     });
 
