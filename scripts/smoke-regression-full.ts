@@ -123,9 +123,13 @@ function bannerLine(n = 60): string {
 
 function safeJson(value: unknown): string {
     try {
-        return JSON.stringify(value);
+        return JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
     } catch {
-        return String(value);
+        try {
+            return String(value);
+        } catch {
+            return "[unstringifiable]";
+        }
     }
 }
 
@@ -912,7 +916,9 @@ async function seedUserOrReuse(params: {
         // Prisma P2002 em cpf: retry com CPF novo
         if (String(e?.code) === "P2002" && Array.isArray(e?.meta?.target) && e.meta.target.includes("cpf")) {
             if (fieldExists(userModel, "cpf")) {
-                const cpfRetry = await generateUniqueCpfForUser(`${params.runId}:${params.seedTag}:retry:${crypto.randomBytes(6).toString("hex")}`);
+                const cpfRetry = await generateUniqueCpfForUser(
+                    `${params.runId}:${params.seedTag}:retry:${crypto.randomBytes(6).toString("hex")}`,
+                );
                 const dataRetry = {
                     ...data,
                     cpf: cpfRetry,
