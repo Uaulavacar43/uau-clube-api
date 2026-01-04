@@ -1,3 +1,4 @@
+// src/modules/dailyWash/DailyWashController.ts
 import type { NextFunction, Request, Response } from "express";
 import { AppError } from "../../error/AppError";
 import type { DailyWashService } from "./DailyWashService";
@@ -5,21 +6,27 @@ import type { CheckDailyWashAvailabilityDTO } from "./dto/CheckDailyWashAvailabi
 import type { RegisterDailyWashDTO } from "./dto/RegisterDailyWashDTO";
 
 export class DailyWashController {
-	constructor(private dailyWashService: DailyWashService) {}
+	constructor(private readonly dailyWashService: DailyWashService) {}
 
 	public async useDailyWash(
-		_req: Request,
+		req: Request,
 		res: Response,
 		next: NextFunction,
 	): Promise<void> {
 		try {
 			const data = res.locals as RegisterDailyWashDTO;
 
+			const loggedUser = req.user;
+			if (!loggedUser) {
+				throw new AppError("Usuário não autenticado", 401);
+			}
+
 			if (!data.licensePlate) {
 				throw new AppError("A placa do veículo é obrigatória", 400);
 			}
 
-			const dailyWash = await this.dailyWashService.useDailyWash(data);
+			// ✅ agora passa o userId (regra nova: placa não é global)
+			const dailyWash = await this.dailyWashService.useDailyWash(data, loggedUser.id);
 
 			res.customJson(dailyWash);
 		} catch (error) {
@@ -34,6 +41,7 @@ export class DailyWashController {
 	): Promise<void> {
 		try {
 			const data = res.locals as CheckDailyWashAvailabilityDTO;
+
 			const loggedUser = req.user;
 			if (!loggedUser) {
 				throw new AppError("Usuário não autenticado", 401);

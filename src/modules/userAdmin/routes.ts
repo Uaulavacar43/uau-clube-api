@@ -1,3 +1,4 @@
+// src/modules/userAdmin/routes.ts
 import { Router } from "express";
 import { authMiddleware } from "../../middlewares/auth.middleware";
 import validateRoutePayload from "../../middlewares/validateRoutePayload";
@@ -5,7 +6,6 @@ import validateRoutePayload from "../../middlewares/validateRoutePayload";
 import { PrismaIndividualServicePurchaseRepository } from "../../repositories/implementations/PrismaIndividualServicePurchaseRepository";
 import { PrismaSubscriptionRepository } from "../../repositories/implementations/PrismaSubscriptionRepository";
 import { PrismaUserRepository } from "../../repositories/implementations/PrismaUserRepository";
-import { PrismaUserCarRepository } from "../../repositories/implementations/PrismaUserCarRepository";
 
 import { CreateUserDTO } from "./dto/CreateUserDTO";
 import { DeleteUserDTO } from "./dto/DeleteUserDTO";
@@ -13,14 +13,8 @@ import { GetAllUsersDTO } from "./dto/GetAllUsersDTO";
 import { UpdateIndividualServicePurchaseDTO } from "./dto/UpdateIndividualServicePurchaseDTO";
 import { UpdateUserDTO } from "./dto/UpdateUserDTO";
 
-
-
 import { UserAdminController } from "./UserAdminController";
 import { UserService } from "./UserAdminService";
-
-import { AdminCarController } from "../adminCar/AdminCarController";
-import { AdminCarService } from "../adminCar/AdminCarService";
-import {AdminUpdateCarDTO} from "../adminCar/dto/AdminUpdateCarDTO";
 
 const router = Router();
 
@@ -32,8 +26,6 @@ const subscriptionRepository = new PrismaSubscriptionRepository();
 const individualServicePurchaseRepository =
 	new PrismaIndividualServicePurchaseRepository();
 
-const userCarRepository = new PrismaUserCarRepository();
-
 // -----------------------------------------------------------------------------
 // Services
 // -----------------------------------------------------------------------------
@@ -43,18 +35,10 @@ const userAdminService = new UserService(
 	individualServicePurchaseRepository,
 );
 
-// PaymentService opcional aqui
-const adminCarService = new AdminCarService(
-	userCarRepository,
-	subscriptionRepository,
-	undefined,
-);
-
 // -----------------------------------------------------------------------------
 // Controllers
 // -----------------------------------------------------------------------------
 const userAdminController = new UserAdminController(userAdminService);
-const adminCarController = new AdminCarController(adminCarService);
 
 // -----------------------------------------------------------------------------
 // MÉTRICAS (antes do "/:id" para evitar conflito)
@@ -68,27 +52,7 @@ router.get("/count/active-subscribers", authMiddleware, (req, res, next) => {
 });
 
 // -----------------------------------------------------------------------------
-// ADMIN: CARROS (NOVO)
-// -----------------------------------------------------------------------------
-router.get(
-	"/cars/license-plate/:licensePlate",
-	authMiddleware,
-	(req, res, next) => {
-		void adminCarController.getCarByPlate(req, res, next);
-	},
-);
-
-router.patch(
-	"/cars/:id",
-	authMiddleware,
-	validateRoutePayload(AdminUpdateCarDTO),
-	(req, res, next) => {
-		void adminCarController.updateCar(req, res, next);
-	},
-);
-
-// -----------------------------------------------------------------------------
-// USERS ADMIN (existente)
+// USERS ADMIN
 // -----------------------------------------------------------------------------
 router.post(
 	"/",

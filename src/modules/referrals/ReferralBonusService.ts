@@ -9,7 +9,7 @@ import prisma from "../../config/dbConfig";
 /**
  * ReferralBonusService
  *
- * ✅ MODELO ATUAL (Opção B):
+ * ✅ MODELO (Opção A):
  * - Bônus por GRUPO FECHADO (até 9 pessoas) e POSIÇÃO.
  * - O pagador (payer) PRECISA estar em ReferralGroupMember com position definida.
  * - Recebedores = posições 1..(payer.position - 1) dentro do MESMO grupo.
@@ -20,26 +20,31 @@ import prisma from "../../config/dbConfig";
  *
  * ✅ UNIQUE:
  * - Gera no primeiro pagamento PAID da assinatura (gatilho vem do PaymentService).
+ * - Credita cashback IMEDIATO (sem atraso).
  * - NÃO bloqueia por cashbackSuspended do grupo.
  *
- * ✅ RECURRENT:
- * - Gera por pagamento PAID, idempotente por paymentId.
- * - BLOQUEIA se:
+ * ✅ RECURRENT (Opção A — atraso de 8 dias, sem schema novo):
+ * - No pagamento PAID: cria ReferralBonus com paymentStatus=PENDING (idempotente por eventKey)
+ * - NÃO credita cashback no PAID
+ * - Job diário: libera os PENDING (>= 8 dias), criando CashbackTransaction + wallet increment,
+ *   e marca ReferralBonus.paymentStatus = PAID (idempotente por eventKey)
+ * - BLOQUEIA a criação do PENDING se:
  *    - grupo.cashbackSuspended === true
- *    - payer estiver inadimplente (PENDING com dueAt < now)
+ *    - payer tiver inadimplência (PENDING com dueAt < now)
  *
- * ✅ AUDITORIA / CASHBACK:
- * - Cria ReferralBonus (eventKey único)
- * - Credita CashbackWallet INTERNAL (increment)
- * - Cria CashbackTransaction EARNED (eventKey único)
- * - NUNCA envia meta=null (evita TS2322 / Prisma Json input)
+ * ✅ IDÊMPOTÊNCIA:
+ * - ReferralBonus: único por eventKey
+ * - CashbackTransaction: único por eventKey
+ * - Se CashbackTransaction já existir, job apenas marca o ReferralBonus como PAID
+ *
+ * ✅ PRISMA JSON:
+ * - NUNCA enviar meta=null
  */
 export class ReferralBonusService {
     constructor(
         private readonly userRepository: IUserRepository,
         // Mantido por compatibilidade com a injeção atual do projeto.
-        // Não é mais necessário para persistência, pois este service passou a usar Prisma
-        // para garantir atomicidade (bonus + wallet + transaction) em uma única transação.
+        // Não é mais necessário para persistência, pois este service usa Prisma para atomicidade.
         private readonly referralRepository: IReferralRepository,
     ) {}
 
@@ -199,7 +204,7 @@ export class ReferralBonusService {
     }
 
     // ---------------------------------------------------------------------
-    // UNIQUE — primeiro pagamento PAID da assinatura
+    // UNIQUE — primeiro pagamento PAID da assinatura (crédito imediato)
     // ---------------------------------------------------------------------
 
     public async generateUniqueOnFirstPaidSubscription(params: {
@@ -210,9 +215,7 @@ export class ReferralBonusService {
         const payerId = Number(params.payerId);
         const subscriptionId = Number(params.subscriptionId);
         const paymentId =
-            params.paymentId !== undefined && params.paymentId !== null
-                ? Number(params.paymentId)
-                : undefined;
+            params.paymentId !== undefined && params.paymentId !== null ? Number(params.paymentId) : undefined;
 
         if (!payerId || Number.isNaN(payerId)) return;
         if (!subscriptionId || Number.isNaN(subscriptionId)) return;
@@ -259,14 +262,14 @@ export class ReferralBonusService {
                 subscriptionId,
             });
 
-            await this.awardBonusAndCashbackAtomic({
+            await this.awardBonusAndCashbackAtomicImmediate({
                 type: "UNIQUE",
                 eventKey,
                 amount,
                 receiverId: r.receiverId,
                 payerId,
-                levelOrPosition: r.receiverPosition, // usamos "level" como posição do recebedor para compat
-                paymentId: paymentId,
+                levelOrPosition: r.receiverPosition, // compat: level = posição
+                paymentId,
                 competenceYearMonth: undefined,
                 relatedId: `subscription:${subscriptionId}`,
                 referralGroupId: ctx.groupId,
@@ -286,7 +289,7 @@ export class ReferralBonusService {
     }
 
     // ---------------------------------------------------------------------
-    // RECURRENT — por pagamento PAID (idempotente por paymentId)
+    // RECURRENT — no pagamento PAID cria PENDING (atraso de 8 dias)
     // ---------------------------------------------------------------------
 
     public async generateRecurrentOnPaidPayment(params: {
@@ -298,14 +301,10 @@ export class ReferralBonusService {
         const payerId = Number(params.payerId);
         const paymentId = Number(params.paymentId);
         const paymentDate =
-            params.paymentDate instanceof Date
-                ? params.paymentDate
-                : new Date(params.paymentDate as any);
+            params.paymentDate instanceof Date ? params.paymentDate : new Date(params.paymentDate as any);
 
         const offset =
-            typeof params.timeZoneOffsetMinutes === "number"
-                ? params.timeZoneOffsetMinutes
-                : -180;
+            typeof params.timeZoneOffsetMinutes === "number" ? params.timeZoneOffsetMinutes : -180;
 
         if (!payerId || Number.isNaN(payerId)) return;
         if (!paymentId || Number.isNaN(paymentId)) return;
@@ -366,59 +365,41 @@ export class ReferralBonusService {
                 competenceYearMonth,
             });
 
-            await this.awardBonusAndCashbackAtomic({
-                type: "RECURRENT",
+            // ✅ OPÇÃO A: cria SOMENTE o ReferralBonus em PENDING (sem wallet/cashback aqui)
+            await this.createPendingRecurrentBonusAtomic({
                 eventKey,
                 amount,
                 receiverId: r.receiverId,
                 payerId,
-                levelOrPosition: r.receiverPosition, // usamos "level" como posição do recebedor para compat
-                paymentId: paymentId,
+                receiverPosition: r.receiverPosition,
+                paymentId,
                 competenceYearMonth,
-                relatedId: `payment:${paymentId}`,
-                referralGroupId: ctx.groupId,
-                referralPosition: r.receiverPosition,
-                meta: {
-                    type: "RECURRENT",
-                    groupId: ctx.groupId,
-                    payerId,
-                    payerPosition: ctx.payerPosition,
-                    receiverId: r.receiverId,
-                    receiverPosition: r.receiverPosition,
-                    paymentId,
-                    competenceYearMonth,
-                },
             });
         }
     }
 
     // ---------------------------------------------------------------------
-    // ATOMIC AWARD (ReferralBonus + CashbackTransaction + Wallet increment)
+    // ATOMIC IMMEDIATE AWARD (UNIQUE)
     // ---------------------------------------------------------------------
 
-    private async awardBonusAndCashbackAtomic(params: {
-        type: "UNIQUE" | "RECURRENT";
+    private async awardBonusAndCashbackAtomicImmediate(params: {
+        type: "UNIQUE";
         eventKey: string;
         amount: number;
 
         receiverId: number;
         payerId: number;
 
-        // compat: o schema atual de ReferralBonus ainda tem "level"
-        // aqui usaremos como "receiverPosition" (1..9)
         levelOrPosition: number;
 
         paymentId?: number;
         competenceYearMonth?: string;
 
-        // CashbackTransaction.relatedId é String?
         relatedId?: string | null;
 
-        // Auditoria do grupo no CashbackTransaction
         referralGroupId?: number | null;
         referralPosition?: number | null;
 
-        // Json do prisma: nunca enviar null
         meta: Record<string, any>;
     }): Promise<void> {
         const eventKey = String(params.eventKey ?? "").trim();
@@ -436,9 +417,7 @@ export class ReferralBonusService {
         if (!levelOrPosition || Number.isNaN(levelOrPosition)) return;
 
         const paymentId =
-            params.paymentId !== undefined && params.paymentId !== null
-                ? Number(params.paymentId)
-                : undefined;
+            params.paymentId !== undefined && params.paymentId !== null ? Number(params.paymentId) : undefined;
 
         const competenceYearMonth =
             params.competenceYearMonth !== undefined && params.competenceYearMonth !== null
@@ -456,9 +435,7 @@ export class ReferralBonusService {
                 : null;
 
         const relatedId =
-            params.relatedId !== undefined && params.relatedId !== null
-                ? String(params.relatedId)
-                : null;
+            params.relatedId !== undefined && params.relatedId !== null ? String(params.relatedId) : null;
 
         const metaInput: Prisma.InputJsonValue = (params.meta ?? {}) as Prisma.InputJsonValue;
 
@@ -500,10 +477,7 @@ export class ReferralBonusService {
                         });
                     } catch (err: any) {
                         const code = String(err?.code ?? "");
-                        if (code !== "P2002") {
-                            throw err;
-                        }
-                        // P2002: já existe (idempotência)
+                        if (code !== "P2002") throw err;
                     }
                 }
 
@@ -514,7 +488,6 @@ export class ReferralBonusService {
                 });
 
                 if (!existingCashbackTx) {
-                    // garante wallet
                     const wallet = await tx.cashbackWallet.upsert({
                         where: {
                             userId_type: {
@@ -531,7 +504,6 @@ export class ReferralBonusService {
                         select: { id: true },
                     });
 
-                    // cria transação (se falhar por P2002, não incrementa)
                     try {
                         await tx.cashbackTransaction.create({
                             data: {
@@ -540,34 +512,28 @@ export class ReferralBonusService {
                                 source: TransactionSource.INDICATION,
                                 amount: Number(amount.toFixed(2)),
                                 relatedId: relatedId,
-                                eventKey: eventKey,
+                                eventKey,
                                 meta: metaInput,
                                 expiresAt: null,
-                                referralGroupId: referralGroupId,
-                                referralPosition: referralPosition,
+                                referralGroupId,
+                                referralPosition,
                             },
                         });
 
                         await tx.cashbackWallet.update({
                             where: { id: wallet.id },
                             data: {
-                                balance: {
-                                    increment: Number(amount.toFixed(2)),
-                                },
+                                balance: { increment: Number(amount.toFixed(2)) },
                             },
                         });
                     } catch (err: any) {
                         const code = String(err?.code ?? "");
-                        if (code === "P2002") {
-                            // idempotência: já criaram a tx, então NÃO incrementa
-                            return;
-                        }
+                        if (code === "P2002") return;
                         throw err;
                     }
                 }
             });
         } catch (err: any) {
-            // Duplicidade: não quebra o fluxo do webhook
             const code = String(err?.code ?? "");
             const msg = String(err?.message ?? "");
 
@@ -583,6 +549,250 @@ export class ReferralBonusService {
 
             throw err;
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // 🕗 OPÇÃO A — RECURRENT com atraso de 8 dias (sem schema)
+    // ---------------------------------------------------------------------
+
+    private static readonly RECURRENT_RELEASE_DELAY_DAYS = 8;
+
+    private computeReleaseCutoff(now: Date): Date {
+        const d = new Date(now.getTime());
+        d.setDate(d.getDate() - ReferralBonusService.RECURRENT_RELEASE_DELAY_DAYS);
+        return d;
+    }
+
+    private parseRecurrentEventKey(eventKey: string): {
+        groupId?: number;
+        paymentId?: number;
+        payerId?: number;
+        payerPos?: number;
+        receiverId?: number;
+        receiverPos?: number;
+        competenceYearMonth?: string;
+    } {
+        const parts = String(eventKey ?? "")
+            .split(":")
+            .map((p) => p.trim())
+            .filter(Boolean);
+
+        const readNum = (prefix: string): number | undefined => {
+            const idx = parts.findIndex((p) => p === prefix);
+            if (idx < 0) return undefined;
+            const raw = parts[idx + 1];
+            const n = Number(raw);
+            return Number.isFinite(n) ? n : undefined;
+        };
+
+        const readStr = (prefix: string): string | undefined => {
+            const idx = parts.findIndex((p) => p === prefix);
+            if (idx < 0) return undefined;
+            const raw = parts[idx + 1];
+            return raw ? String(raw) : undefined;
+        };
+
+        return {
+            groupId: readNum("group"),
+            paymentId: readNum("payment"),
+            payerId: readNum("payer"),
+            payerPos: readNum("payerPos"),
+            receiverId: readNum("receiver"),
+            receiverPos: readNum("receiverPos"),
+            competenceYearMonth: readStr("competence"),
+        };
+    }
+
+    private async createPendingRecurrentBonusAtomic(params: {
+        eventKey: string;
+        amount: number;
+        receiverId: number;
+        payerId: number;
+        receiverPosition: number;
+        paymentId: number;
+        competenceYearMonth: string;
+    }): Promise<void> {
+        const eventKey = String(params.eventKey ?? "").trim();
+        if (!eventKey) return;
+
+        const amount = Number(params.amount);
+        if (!Number.isFinite(amount) || amount <= 0) return;
+
+        const receiverId = Number(params.receiverId);
+        const payerId = Number(params.payerId);
+        const paymentId = Number(params.paymentId);
+        const receiverPosition = Number(params.receiverPosition);
+        const competenceYearMonth = String(params.competenceYearMonth ?? "").trim();
+
+        if (!receiverId || Number.isNaN(receiverId)) return;
+        if (!payerId || Number.isNaN(payerId)) return;
+        if (!paymentId || Number.isNaN(paymentId)) return;
+        if (!receiverPosition || Number.isNaN(receiverPosition)) return;
+        if (!competenceYearMonth) return;
+
+        await prisma.$transaction(async (tx) => {
+            const existing = await tx.referralBonus.findUnique({
+                where: { eventKey },
+                select: { id: true },
+            });
+
+            if (existing) return;
+
+            try {
+                await tx.referralBonus.create({
+                    data: {
+                        receiverId,
+                        payerId,
+                        level: receiverPosition,
+                        type: "RECURRENT",
+                        amount: Number(amount.toFixed(2)),
+                        paymentStatus: "PENDING",
+                        eventKey,
+                        competenceYearMonth,
+                        paymentId,
+                    },
+                });
+            } catch (err: any) {
+                if (String(err?.code ?? "") === "P2002") return;
+                throw err;
+            }
+        });
+    }
+
+    private async releaseOnePendingRecurrentBonusAtomic(bonusId: number): Promise<void> {
+        const id = Number(bonusId);
+        if (!id || Number.isNaN(id)) return;
+
+        await prisma.$transaction(async (tx) => {
+            const bonus = await tx.referralBonus.findUnique({
+                where: { id },
+                select: {
+                    id: true,
+                    type: true,
+                    paymentStatus: true,
+                    eventKey: true,
+                    amount: true,
+                    receiverId: true,
+                    payerId: true,
+                    competenceYearMonth: true,
+                    paymentId: true,
+                },
+            });
+
+            if (!bonus) return;
+            if (bonus.type !== "RECURRENT") return;
+
+            if (bonus.paymentStatus === "PAID") return;
+
+            const eventKey = String(bonus.eventKey ?? "").trim();
+            if (!eventKey) return;
+
+            const existingCashbackTx = await tx.cashbackTransaction.findUnique({
+                where: { eventKey },
+                select: { id: true },
+            });
+
+            if (!existingCashbackTx) {
+                const parsed = this.parseRecurrentEventKey(eventKey);
+
+                const amount = Number(bonus.amount ?? 0);
+                if (!Number.isFinite(amount) || amount <= 0) return;
+
+                const wallet = await tx.cashbackWallet.upsert({
+                    where: {
+                        userId_type: {
+                            userId: bonus.receiverId,
+                            type: WalletType.INTERNAL,
+                        },
+                    },
+                    update: {},
+                    create: {
+                        userId: bonus.receiverId,
+                        type: WalletType.INTERNAL,
+                        balance: 0,
+                    },
+                    select: { id: true },
+                });
+
+                try {
+                    await tx.cashbackTransaction.create({
+                        data: {
+                            userId: bonus.receiverId,
+                            type: TransactionType.EARNED,
+                            source: TransactionSource.INDICATION,
+                            amount: Number(amount.toFixed(2)),
+                            relatedId: bonus.paymentId ? `payment:${bonus.paymentId}` : null,
+                            eventKey,
+                            meta: {
+                                type: "RECURRENT_RELEASED",
+                                competenceYearMonth: bonus.competenceYearMonth ?? null,
+                                groupId: parsed.groupId ?? null,
+                                payerId: parsed.payerId ?? bonus.payerId,
+                                payerPosition: parsed.payerPos ?? null,
+                                receiverId: parsed.receiverId ?? bonus.receiverId,
+                                receiverPosition: parsed.receiverPos ?? null,
+                                paymentId: parsed.paymentId ?? bonus.paymentId ?? null,
+                                bonusId: bonus.id,
+                            } as Prisma.InputJsonValue,
+                            expiresAt: null,
+                            referralGroupId: parsed.groupId ?? null,
+                            referralPosition: parsed.receiverPos ?? null,
+                        },
+                    });
+
+                    await tx.cashbackWallet.update({
+                        where: { id: wallet.id },
+                        data: {
+                            balance: { increment: Number(amount.toFixed(2)) },
+                        },
+                    });
+                } catch (err: any) {
+                    if (String(err?.code ?? "") !== "P2002") throw err;
+                }
+            }
+
+            await tx.referralBonus.update({
+                where: { id: bonus.id },
+                data: { paymentStatus: "PAID" },
+            });
+        });
+    }
+
+    /**
+     * ✅ método esperado pelo job:
+     * - assinatura: processDueRecurrentBonuses(now: Date)
+     * - retorno: { processed: number }
+     */
+    public async processDueRecurrentBonuses(now: Date): Promise<{ processed: number }> {
+        const safeNow = now instanceof Date ? now : new Date(now as any);
+        if (Number.isNaN(safeNow.getTime())) return { processed: 0 };
+
+        const cutoff = this.computeReleaseCutoff(safeNow);
+
+        // assume createdAt existe; se não existir, me diz o nome do campo e eu ajusto
+        const pending = await prisma.referralBonus.findMany({
+            where: {
+                type: "RECURRENT",
+                paymentStatus: "PENDING",
+                createdAt: { lte: cutoff },
+            } as any,
+            orderBy: { createdAt: "asc" } as any,
+            take: 500,
+            select: { id: true },
+        });
+
+        let processed = 0;
+
+        for (const b of pending) {
+            try {
+                await this.releaseOnePendingRecurrentBonusAtomic(b.id);
+                processed++;
+            } catch (err) {
+                console.error("[ReferralBonusService][processDueRecurrentBonuses] erro bonusId=", b.id, err);
+            }
+        }
+
+        return { processed };
     }
 
     // ---------------------------------------------------------------------
@@ -643,5 +853,4 @@ export class ReferralBonusService {
         const month = String(d.getMonth() + 1).padStart(2, "0");
         return `${year}-${month}`;
     }
-
 }

@@ -4,6 +4,7 @@ import type {
     Plan as PrismaPlan,
     Subscription as PrismaSubscription,
 } from "@prisma/client";
+
 import prisma from "../../config/dbConfig";
 import { Coupon } from "../../entities/Coupon";
 import { PeriodicityType, Plan } from "../../entities/Plan";
@@ -22,11 +23,7 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
     public async findByUserAndCar(userId: number, carId: number): Promise<Subscription | null> {
         const subscription = await prisma.subscription.findFirst({
             where: { userId, carId },
-            include: {
-                car: true,
-                plan: true,
-                coupon: true,
-            },
+            include: { car: true, plan: true, coupon: true },
         });
         if (!subscription) return null;
         return this.mapToEntity(subscription);
@@ -35,59 +32,64 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
     public async findById(id: number, includeCars = false): Promise<Subscription | null> {
         const subscription = await prisma.subscription.findUnique({
             where: { id },
-            include: {
-                car: includeCars,
-                plan: true,
-                coupon: true,
-            },
+            include: { car: includeCars, plan: true, coupon: true },
         });
         if (!subscription) return null;
-        return this.mapToEntity(subscription);
-    }
-
-    public async findByUserId(userId: number, includeCars = false): Promise<Subscription[]> {
-        const subscriptions = await prisma.subscription.findMany({
-            where: {
-                userId,
-                isActive: true,
-            },
-            include: {
-                car: includeCars,
-                plan: true,
-                coupon: true,
-            },
-        });
-        return subscriptions.map(this.mapToEntity.bind(this));
-    }
-
-    public async findByCarLicensePlate(licensePlate: string): Promise<Subscription | null> {
-        const normalized = this.normalizePlate(licensePlate);
-
-        if (!normalized) return null;
-
-        const car = await prisma.car.findFirst({
-            where: { licensePlate: normalized, deletedAt: null },
-            select: { id: true },
-        });
-        if (!car) return null;
-
-        const subscription = await prisma.subscription.findFirst({
-            where: { carId: car.id, isActive: true },
-            include: {
-                car: true,
-                plan: true,
-                coupon: true,
-            },
-        });
-        if (!subscription) return null;
-
         return this.mapToEntity(subscription);
     }
 
     /**
-     * CORREÇÃO: respeitar startDate vindo da entidade (não sobrescrever sempre com new Date()).
-     * Isso impacta validade, expiração e consistência de relatórios.
+     * ✅ Não filtrar por isActive aqui — você precisa do histórico em:
+     * - reconciliação
+     * - suporte
+     * - auditoria
      */
+    public async findByUserId(userId: number, includeCars = false): Promise<Subscription[]> {
+        const subscriptions = await prisma.subscription.findMany({
+            where: { userId },
+            include: { car: includeCars, plan: true, coupon: true },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        });
+
+        return subscriptions.map(this.mapToEntity.bind(this));
+    }
+
+    /**
+     * ✅ CORRETO: placa + userId
+     */
+    public async findByCarLicensePlateAndUserId(
+        licensePlate: string,
+        userId: number,
+    ): Promise<Subscription | null> {
+        const normalized = this.normalizePlate(licensePlate);
+        if (!normalized) return null;
+
+        const car = await prisma.car.findFirst({
+            where: { userId, licensePlate: normalized, deletedAt: null },
+            select: { id: true },
+        });
+        if (!car) return null;
+
+        const now = new Date();
+
+        const subscription = await prisma.subscription.findFirst({
+            where: {
+                carId: car.id,
+                OR: [
+                    // regra forte (nova)
+                    { subscriptionStatus: "ACTIVE", expiresAt: { gt: now } },
+                    // fallback (legado/consistência)
+                    { isActive: true },
+                ],
+            },
+            include: { car: true, plan: true, coupon: true },
+            orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+        });
+
+        if (!subscription) return null;
+        return this.mapToEntity(subscription);
+    }
+
     public async create(data: Subscription): Promise<Subscription> {
         const {
             userId,
@@ -123,11 +125,7 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
                 couponId,
                 subscriptionStatus,
             },
-            include: {
-                car: true,
-                plan: true,
-                coupon: true,
-            },
+            include: { car: true, plan: true, coupon: true },
         });
 
         return this.mapToEntity(createdSubscription);
@@ -135,43 +133,34 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
 
     public async update(
         subscriptionId: number,
-        data: Partial<Omit<Subscription, "car" | "id" | "plan" | "coupon">>,
+        data: Partial<Omit<Subscription, "car" | "id" | "plan" | "coupon">> | Subscription,
     ): Promise<Subscription> {
         const updatedSubscription = await prisma.subscription.update({
             where: { id: subscriptionId },
             data: {
-                userId: data.userId,
-                carId: data.carId,
-                planId: data.planId,
-                planType: data.planType,
-                amount: data.amount,
-                paymentMethod: data.paymentMethod,
-                startDate: data.startDate,
-                endDate: data.endDate,
-                // Evite alterar createdAt via update, mas mantive conforme seu código
-                createdAt: data.createdAt,
-                updatedAt: data.updatedAt,
-                expiresAt: data.expiresAt,
-                subscriptionIdAsaas: data.subscriptionIdAsaas,
-                installmentIdAsaas: data.installmentIdAsaas,
-                couponId: data.couponId,
-                isActive: data.isActive,
-                subscriptionStatus: data.subscriptionStatus,
+                userId: (data as any).userId,
+                carId: (data as any).carId,
+                planId: (data as any).planId,
+                planType: (data as any).planType,
+                amount: (data as any).amount,
+                paymentMethod: (data as any).paymentMethod,
+                startDate: (data as any).startDate,
+                endDate: (data as any).endDate,
+                createdAt: (data as any).createdAt, // ideal remover, mas mantive compat
+                updatedAt: (data as any).updatedAt,
+                expiresAt: (data as any).expiresAt,
+                subscriptionIdAsaas: (data as any).subscriptionIdAsaas,
+                installmentIdAsaas: (data as any).installmentIdAsaas,
+                couponId: (data as any).couponId,
+                isActive: (data as any).isActive,
+                subscriptionStatus: (data as any).subscriptionStatus,
             },
-            include: {
-                car: true,
-                plan: true,
-                coupon: true,
-            },
+            include: { car: true, plan: true, coupon: true },
         });
 
         return this.mapToEntity(updatedSubscription);
     }
 
-    /**
-     * CORREÇÃO: ao cancelar, além de isActive=false, marcar subscriptionStatus=CANCELED.
-     * Isso evita o sistema “interpretar” como SUSPENDED e reativar indevidamente via regras.
-     */
     public async cancel(subscriptionId: number): Promise<void> {
         await prisma.subscription.update({
             where: { id: subscriptionId },
@@ -187,11 +176,7 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
     public async getByAsaasId(subscriptionIdAsaas: string): Promise<Subscription | null> {
         const result = await prisma.subscription.findFirst({
             where: { subscriptionIdAsaas },
-            include: {
-                car: true,
-                plan: true,
-                coupon: true,
-            },
+            include: { car: true, plan: true, coupon: true },
         });
         return result ? this.mapToEntity(result) : null;
     }
@@ -199,19 +184,11 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
     public async getByInstallmentIdAsaas(installmentIdAsaas: string): Promise<Subscription | null> {
         const result = await prisma.subscription.findFirst({
             where: { installmentIdAsaas },
-            include: {
-                car: true,
-                plan: true,
-                coupon: true,
-            },
+            include: { car: true, plan: true, coupon: true },
         });
         return result ? this.mapToEntity(result) : null;
     }
 
-    /**
-     * CORREÇÃO: cancelar por asaasId também deve marcar subscriptionStatus=CANCELED,
-     * e setar endDate para rastreabilidade.
-     */
     public async cancelByAsaasId(subscriptionIdAsaas: string): Promise<void> {
         await prisma.subscription.updateMany({
             where: { subscriptionIdAsaas },
@@ -224,18 +201,11 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
         });
     }
 
-    /** Retorna a primeira assinatura ativa do usuário. */
     public async getActiveSubscriptionByUserId(userId: number): Promise<Subscription | null> {
         const result = await prisma.subscription.findFirst({
-            where: {
-                userId,
-                isActive: true,
-            },
-            include: {
-                car: true,
-                plan: true,
-                coupon: true,
-            },
+            where: { userId, isActive: true },
+            include: { car: true, plan: true, coupon: true },
+            orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
         });
         return result ? this.mapToEntity(result) : null;
     }
@@ -245,34 +215,22 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
             case PeriodicityType.WEEK:
             case "WEEKLY":
                 return PeriodicityType.WEEK;
-
             case PeriodicityType.MONTH:
             case "MONTHLY":
                 return PeriodicityType.MONTH;
-
             case PeriodicityType.QUARTERLY:
                 return PeriodicityType.QUARTERLY;
-
             case PeriodicityType.SEMIANNUALLY:
                 return PeriodicityType.SEMIANNUALLY;
-
             case PeriodicityType.YEAR:
             case "YEARLY":
                 return PeriodicityType.YEAR;
-
             default:
                 return PeriodicityType.MONTH;
         }
     }
 
-    /**
-     * CORREÇÃO: preservar subscriptionStatus do banco quando existir.
-     * Se não existir (null/undefined), usar fallback baseado em isActive.
-     */
-    private normalizeSubscriptionStatus(
-        raw: any,
-        fallbackIsActive: boolean,
-    ): SubscriptionStatus {
+    private normalizeSubscriptionStatus(raw: any, fallbackIsActive: boolean): SubscriptionStatus {
         if (raw === "ACTIVE" || raw === "SUSPENDED" || raw === "CANCELED") {
             return raw as SubscriptionStatus;
         }

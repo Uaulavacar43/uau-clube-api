@@ -4,18 +4,20 @@ import { AppError } from "../../error/AppError";
 
 /**
  * ---------------------------------------------------------------------
- * EXTERNAL REFERENCE (ASAAS) - CORREÇÃO DO LIMITE 100 CARACTERES
+ * PAYMENT POLICY (single source of truth)
  * ---------------------------------------------------------------------
  *
- * O ASAAS limita o campo `externalReference` a 100 caracteres.
- * Antes era JSON.stringify(...) e estourava.
+ * Responsabilidades:
+ * - Helpers gerais (money/date/string/plate/timezone clamp)
+ * - Proteções (ensureMinimumAmount)
+ * - ASAAS externalReference:
+ *   • build (compact <= 100 chars)
+ *   • parse (compact + retrocompat JSON legado)
+ *   • resolveFinalAmountFromExternalReference (fonte de verdade no webhook)
  *
- * Agora usamos formato compacto:
- *   u:1545|p:6|c:12|s:319|cb:139.9|cu:0|cr:0|mc:1|tz:-180
- *
- * Regras:
- * - Sempre <= 100 chars, senão dispara erro ANTES de chamar ASAAS.
- * - Webhooks continuam aceitando JSON antigo (retrocompatível).
+ * Observação:
+ * - ASAAS limita externalReference a 100 caracteres.
+ * - Se exceder, dispara erro ANTES de chamar ASAAS.
  */
 export type AsaasExternalReferenceParsed = {
     userId?: number;
@@ -96,7 +98,7 @@ export class PaymentPolicy {
     }
 
     // ---------------------------------------------------------------------
-    // FASE 3: Proteções para não persistir amount <= 0 (constraint DB)
+    // Proteções para não persistir amount <= 0 (constraint DB)
     // ---------------------------------------------------------------------
 
     public static ensureMinimumAmount(
@@ -113,6 +115,10 @@ export class PaymentPolicy {
     // Helpers gerais (timezone / money)
     // ---------------------------------------------------------------------
 
+    /**
+     * Normaliza/clampa um offset em minutos (ex.: vindo do client).
+     * Não calcula offset por timezone string (isso é outra responsabilidade).
+     */
     public static resolveTimeZoneOffsetMinutes(
         value: unknown,
         fallback = -180,
@@ -137,7 +143,7 @@ export class PaymentPolicy {
     }
 
     // ---------------------------------------------------------------------
-    // EXTERNAL REFERENCE (ASAAS) - compact encode/decode + retrocompat JSON
+    // ASAAS externalReference (compact <= 100) + retrocompat JSON legado
     // ---------------------------------------------------------------------
 
     public static numberOrUndefined(value: unknown): number | undefined {
@@ -147,6 +153,14 @@ export class PaymentPolicy {
         return n;
     }
 
+    /**
+     * Formato compacto:
+     *   u:1545|p:6|c:12|s:319|cb:139.9|cu:0|cr:0|mc:1|tz:-180
+     *
+     * Regras:
+     * - Sempre <= 100 chars (ASAAS).
+     * - Se exceder, lança AppError ANTES de chamar ASAAS.
+     */
     public static buildAsaasExternalReference(
         data: AsaasExternalReferenceParsed,
     ): string {
@@ -287,7 +301,7 @@ export class PaymentPolicy {
     }
 
     // ---------------------------------------------------------------------
-    // resolveFinalAmountFromExternalReference (IDÊNTICO AO PaymentService)
+    // resolveFinalAmountFromExternalReference (fonte de verdade)
     // ---------------------------------------------------------------------
 
     public static resolveFinalAmountFromExternalReference(params: {

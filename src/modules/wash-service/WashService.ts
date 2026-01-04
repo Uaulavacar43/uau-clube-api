@@ -18,22 +18,20 @@ export class WashServiceService {
 		data: UpdateWashServiceDTO,
 		adminId: number,
 	): Promise<WashService> {
-		const existingService =
-			await this.washServiceRepository.findById(serviceId);
+		const existingService = await this.washServiceRepository.findById(serviceId);
 		if (!existingService) {
 			throw new AppError("Serviço não encontrado", 404);
 		}
 
-		// Chamamos `update` no repositório sem incluir `adminId` no objeto `data`
 		return await this.washServiceRepository.update(serviceId, data, adminId);
 	}
 
-	public async delete(serviceId: number, adminId: number): Promise<void> {
-		const existingService =
-			await this.washServiceRepository.findById(serviceId);
+	public async delete(serviceId: number, _adminId: number): Promise<void> {
+		const existingService = await this.washServiceRepository.findById(serviceId);
 		if (!existingService) {
 			throw new AppError("Serviço não encontrado", 404);
 		}
+
 		await this.washServiceRepository.delete(serviceId);
 	}
 
@@ -44,14 +42,14 @@ export class WashServiceService {
 		showPurchasedCount?: boolean,
 		userId?: number,
 	): Promise<{ services: WashService[]; totalPages: number }> {
-		const { services, total } =
-			await this.washServiceRepository.findAllWithLocations(
-				page,
-				pageSize,
-				isPublished,
-				showPurchasedCount,
-				userId,
-			);
+		const { services, total } = await this.washServiceRepository.findAllWithLocations(
+			page,
+			pageSize,
+			isPublished,
+			showPurchasedCount,
+			userId,
+		);
+
 		const totalPages = Math.ceil(total / pageSize);
 		return { services, totalPages };
 	}
@@ -62,6 +60,7 @@ export class WashServiceService {
 	}> {
 		const { individualServicePurchase, total } =
 			await this.washServiceRepository.findTopSoldServices(filters);
+
 		const totalPages = Math.ceil(total / filters.pageSize);
 		return { individualServicePurchase, totalPages };
 	}

@@ -24,31 +24,12 @@ import { ASAASWebhookEventEnum, type ASAASWebhookEvent } from "../../utils/asaas
 
 import type { CreateSubscriptionToPlanDTO } from "./dto/CreateSubscriptionToPlanDTO";
 
+// Fonte de verdade de policy + externalReference
+import { PaymentPolicy } from "./PaymentPolicy";
+import { AsaasBillingService } from "./AsaasBillingService";
+
 // Para tipar payload diretamente da função util
 type AsaasCreatePaymentPayload = Parameters<typeof asaasCreatePayment>[0];
-
-/**
- * ---------------------------------------------------------------------
- * EXTERNAL REFERENCE (ASAAS) - CORREÇÃO DO LIMITE 100 CARACTERES
- * ---------------------------------------------------------------------
- *
- * O ASAAS limita o campo `externalReference` a 100 caracteres.
- * Agora usamos formato compacto:
- *   u:1545|p:6|c:12|s:319|cb:139.9|cu:0|cr:0|mc:1|tz:-180
- *
- * Webhooks continuam aceitando JSON antigo (retrocompatível).
- */
-type AsaasExternalReferenceParsed = {
-    userId?: number;
-    planId?: number;
-    couponId?: number;
-    subId?: number;
-    cashbackUsedAmount?: number;
-    cashbackBaseAmount?: number;
-    cashbackRequestedAmount?: number;
-    minimumCharge?: number;
-    timeZoneOffsetMinutes?: number;
-};
 
 type CouponPricingResult = {
     finalAmount: number;
@@ -69,12 +50,11 @@ type CashbackUsageResult = {
  * - handler do webhook de subscription (SUBSCRIPTION_CREATED / cancelamento)
  *
  * IMPORTANTE:
- * Este service replica a MESMA lógica do PaymentService (seção de assinatura),
- * apenas extraída para reduzir tamanho e separar responsabilidades.
+ * - ExternalReference (build/parse) => PaymentPolicy (não repete aqui)
+ * - map status / resolve paymentType => AsaasBillingService (não repete aqui)
  */
 export class SubscriptionLifecycleService {
-    private static readonly MINIMUM_CHARGE_AMOUNT = 1;
-    private static readonly ASAAS_EXTERNAL_REFERENCE_MAX_LEN = 100;
+    private readonly asaasBilling = new AsaasBillingService();
 
     constructor(
         private readonly subscriptionRepository: ISubscriptionRepository,
@@ -87,35 +67,6 @@ export class SubscriptionLifecycleService {
     // ---------------------------------------------------------------------
     // Hydration helpers (garante entidade com métodos de domínio e Dates)
     // ---------------------------------------------------------------------
-
-    private toDate(value: unknown): Date | null {
-        if (!value) return null;
-
-        if (value instanceof Date) {
-            return Number.isNaN(value.getTime()) ? null : value;
-        }
-
-        const d = new Date(value as any);
-        return Number.isNaN(d.getTime()) ? null : d;
-    }
-
-    private isoDateString(date: Date): string {
-        return new Date(date.getTime()).toISOString().split("T")[0];
-    }
-
-    private parseIsoDateToDate(value: unknown): Date | null {
-        if (!value) return null;
-        if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
-        if (typeof value !== "string") return null;
-
-        const trimmed = value.trim();
-        if (!trimmed) return null;
-
-        // ASAAS geralmente manda YYYY-MM-DD
-        // new Date("YYYY-MM-DD") interpreta como UTC 00:00:00
-        const d = new Date(trimmed);
-        return Number.isNaN(d.getTime()) ? null : d;
-    }
 
     /**
      * Converte um "raw" (retorno de ORM/repo) em instância de Subscription,
@@ -133,14 +84,15 @@ export class SubscriptionLifecycleService {
             return raw;
         }
 
-        const createdAt = this.toDate(raw?.createdAt) ?? new Date();
-        const startDate = this.toDate(raw?.startDate) ?? this.toDate(raw?.createdAt) ?? new Date();
+        const createdAt = PaymentPolicy.toDate(raw?.createdAt) ?? new Date();
+        const startDate = PaymentPolicy.toDate(raw?.startDate) ?? PaymentPolicy.toDate(raw?.createdAt) ?? new Date();
 
-        const updatedAt = this.toDate(raw?.updatedAt) ?? createdAt;
-        const expiresAt = this.toDate(raw?.expiresAt);
-        const endDate = this.toDate(raw?.endDate);
+        const updatedAt = PaymentPolicy.toDate(raw?.updatedAt) ?? createdAt;
+        const expiresAt = PaymentPolicy.toDate(raw?.expiresAt);
+        const endDate = PaymentPolicy.toDate(raw?.endDate);
 
-        const planType: PeriodicityType = raw?.planType ?? raw?.plan?.periodicityType ?? PeriodicityType.MONTH;
+        const planType: PeriodicityType =
+            raw?.planType ?? raw?.plan?.periodicityType ?? PeriodicityType.MONTH;
 
         const subscriptionStatus = raw?.subscriptionStatus ?? (raw?.isActive ? "ACTIVE" : "SUSPENDED");
 
@@ -169,79 +121,13 @@ export class SubscriptionLifecycleService {
     }
 
     // ---------------------------------------------------------------------
-    // Helpers internos (placa, status e tipos)
+    // Helpers de plano / assinatura
     // ---------------------------------------------------------------------
-
-    private normalizePlate(value: string): string {
-        return (value ?? "")
-            .trim()
-            .toUpperCase()
-            .replace(/[^A-Z0-9]/g, "");
-    }
-
-    private resolvePaymentType(type: CreateSubscriptionToPlanDTO["type"]): "creditCard" | "pix" {
-        return (type ?? "creditCard") === "pix" ? "pix" : "creditCard";
-    }
-
-    private mapAsaasPaymentStatusToInternal(status: ASAASPaymentStatusEnum): "PAID" | "PENDING" | "CANCELED" {
-        switch (status) {
-            case ASAASPaymentStatusEnum.CONFIRMED:
-            case ASAASPaymentStatusEnum.RECEIVED:
-            case ASAASPaymentStatusEnum.RECEIVED_IN_CASH:
-                return "PAID";
-
-            case ASAASPaymentStatusEnum.REFUNDED:
-            case ASAASPaymentStatusEnum.CHARGEBACK_REQUESTED:
-            case ASAASPaymentStatusEnum.CHARGEBACK_DISPUTE:
-            case ASAASPaymentStatusEnum.AWAITING_CHARGEBACK_REVERSAL:
-                return "CANCELED";
-
-            default:
-                return "PENDING";
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // Proteção amount mínimo
-    // ---------------------------------------------------------------------
-
-    private ensureMinimumAmount(value: number, minimum = SubscriptionLifecycleService.MINIMUM_CHARGE_AMOUNT): number {
-        const n = Number(value);
-        if (!Number.isFinite(n)) return minimum;
-        if (n <= 0) return minimum;
-        return Number(n.toFixed(2));
-    }
-
-    // ---------------------------------------------------------------------
-    // Helpers gerais (timezone / money)
-    // ---------------------------------------------------------------------
-
-    private resolveTimeZoneOffsetMinutes(value: unknown, fallback = -180): number {
-        const n = Number(value);
-        if (!Number.isFinite(n)) return fallback;
-
-        // clamp razoável de offsets globais: [-12h .. +14h] => [-720 .. +840]
-        const clamped = Math.max(-720, Math.min(840, Math.trunc(n)));
-        return clamped;
-    }
-
-    private normalizeMoney(value: unknown): number {
-        const n = Number(value);
-        if (!Number.isFinite(n)) return 0;
-        if (n <= 0) return 0;
-        return Number(n.toFixed(2));
-    }
-
-    private parseCashbackAmount(input: unknown): number {
-        return this.normalizeMoney(input);
-    }
 
     /**
      * Para PLANO RECORRENTE (assinatura ASAAS):
      * - nextDueDate precisa ir para o PRÓXIMO CICLO
      * - e a 1ª mensalidade é uma cobrança avulsa "agora"
-     *
-     * Aqui calculamos o próximo vencimento baseado na periodicidade.
      */
     private calculateNextSubscriptionDueDate(plan: Plan, referenceDate: Date): Date {
         const base = new Date(referenceDate.getTime());
@@ -268,163 +154,12 @@ export class SubscriptionLifecycleService {
                 break;
 
             default:
-                // fallback conservador
                 base.setMonth(base.getMonth() + 1);
                 break;
         }
 
         return base;
     }
-
-    // ---------------------------------------------------------------------
-    // EXTERNAL REFERENCE (ASAAS) - compact encode/decode + retrocompat JSON
-    // ---------------------------------------------------------------------
-
-    private numberOrUndefined(value: unknown): number | undefined {
-        if (value === undefined || value === null) return undefined;
-        const n = Number(value);
-        if (!Number.isFinite(n)) return undefined;
-        return n;
-    }
-
-    private buildAsaasExternalReference(data: AsaasExternalReferenceParsed): string {
-        const parts: string[] = [];
-
-        const u = this.numberOrUndefined(data.userId);
-        if (u !== undefined) parts.push(`u:${Math.trunc(u)}`);
-
-        const p = this.numberOrUndefined(data.planId);
-        if (p !== undefined) parts.push(`p:${Math.trunc(p)}`);
-
-        const c = this.numberOrUndefined(data.couponId);
-        if (c !== undefined) parts.push(`c:${Math.trunc(c)}`);
-
-        const s = this.numberOrUndefined(data.subId);
-        if (s !== undefined) parts.push(`s:${Math.trunc(s)}`);
-
-        const cb = this.numberOrUndefined(data.cashbackBaseAmount);
-        if (cb !== undefined) parts.push(`cb:${Number(cb.toFixed(2))}`);
-
-        const cu = this.numberOrUndefined(data.cashbackUsedAmount);
-        if (cu !== undefined) parts.push(`cu:${Number(cu.toFixed(2))}`);
-
-        const cr = this.numberOrUndefined(data.cashbackRequestedAmount);
-        if (cr !== undefined) parts.push(`cr:${Number(cr.toFixed(2))}`);
-
-        const mc = this.numberOrUndefined(data.minimumCharge);
-        if (mc !== undefined) parts.push(`mc:${Number(mc.toFixed(2))}`);
-
-        const tz = this.numberOrUndefined(data.timeZoneOffsetMinutes);
-        if (tz !== undefined) parts.push(`tz:${Math.trunc(tz)}`);
-
-        const out = parts.join("|");
-
-        if (out.length === 0) {
-            return "";
-        }
-
-        if (out.length > SubscriptionLifecycleService.ASAAS_EXTERNAL_REFERENCE_MAX_LEN) {
-            throw new AppError(
-                `externalReference excede ${SubscriptionLifecycleService.ASAAS_EXTERNAL_REFERENCE_MAX_LEN} caracteres após compactação. Atual: ${out.length}`,
-                500,
-            );
-        }
-
-        return out;
-    }
-
-    private parseAsaasExternalReference(raw: unknown): AsaasExternalReferenceParsed | null {
-        if (!raw) return null;
-        if (typeof raw !== "string") return null;
-
-        const value = raw.trim();
-        if (!value) return null;
-
-        // Retrocompat: JSON antigo
-        if (value.startsWith("{") && value.endsWith("}")) {
-            try {
-                const parsed = JSON.parse(value) as {
-                    userId?: number;
-                    planId?: number;
-                    couponId?: number;
-                    subId?: number;
-                    cashbackUsedAmount?: number;
-                    cashbackBaseAmount?: number;
-                    cashbackRequestedAmount?: number;
-                    timeZoneOffsetMinutes?: number;
-                    minimumCharge?: number;
-                };
-
-                return {
-                    userId: this.numberOrUndefined(parsed.userId),
-                    planId: this.numberOrUndefined(parsed.planId),
-                    couponId: this.numberOrUndefined(parsed.couponId),
-                    subId: this.numberOrUndefined(parsed.subId),
-                    cashbackUsedAmount: this.numberOrUndefined(parsed.cashbackUsedAmount),
-                    cashbackBaseAmount: this.numberOrUndefined(parsed.cashbackBaseAmount),
-                    cashbackRequestedAmount: this.numberOrUndefined(parsed.cashbackRequestedAmount),
-                    timeZoneOffsetMinutes: this.numberOrUndefined(parsed.timeZoneOffsetMinutes),
-                    minimumCharge: this.numberOrUndefined(parsed.minimumCharge),
-                };
-            } catch {
-                // cai pro modo compacto abaixo
-            }
-        }
-
-        // Formato compacto: k:v|k:v
-        const out: AsaasExternalReferenceParsed = {};
-        const pairs = value.split("|").map((p) => p.trim()).filter(Boolean);
-
-        for (const pair of pairs) {
-            const idx = pair.indexOf(":");
-            if (idx <= 0) continue;
-
-            const k = pair.slice(0, idx).trim();
-            const vRaw = pair.slice(idx + 1).trim();
-            if (!vRaw) continue;
-
-            const v = this.numberOrUndefined(vRaw);
-            if (v === undefined) continue;
-
-            switch (k) {
-                case "u":
-                    out.userId = Math.trunc(v);
-                    break;
-                case "p":
-                    out.planId = Math.trunc(v);
-                    break;
-                case "c":
-                    out.couponId = Math.trunc(v);
-                    break;
-                case "s":
-                    out.subId = Math.trunc(v);
-                    break;
-                case "cb":
-                    out.cashbackBaseAmount = Number(v.toFixed(2));
-                    break;
-                case "cu":
-                    out.cashbackUsedAmount = Number(v.toFixed(2));
-                    break;
-                case "cr":
-                    out.cashbackRequestedAmount = Number(v.toFixed(2));
-                    break;
-                case "mc":
-                    out.minimumCharge = Number(v.toFixed(2));
-                    break;
-                case "tz":
-                    out.timeZoneOffsetMinutes = Math.trunc(v);
-                    break;
-                default:
-                    break;
-            }
-        }
-
-        return Object.keys(out).length > 0 ? out : null;
-    }
-
-    // ---------------------------------------------------------------------
-    // Helpers de plano / assinatura
-    // ---------------------------------------------------------------------
 
     public calculatePlanExpiration(plan: Plan, referenceDate: Date): Date {
         const baseDate = new Date(referenceDate.getTime());
@@ -576,21 +311,19 @@ export class SubscriptionLifecycleService {
     }
 
     // ---------------------------------------------------------------------
-    // Carro tem assinatura ativa?
+    // ✅ Carro tem assinatura ativa? (REGRA NOVA: precisa de userId)
     // ---------------------------------------------------------------------
 
-    public async carHasSubscription(licensePlate: string): Promise<boolean> {
-        const normalizedPlate = this.normalizePlate(licensePlate);
+    public async carHasSubscription(userId: number, licensePlate: string): Promise<boolean> {
+        const normalizedPlate = PaymentPolicy.normalizePlate(licensePlate);
+        if (!normalizedPlate) return false;
 
-        if (!normalizedPlate) {
-            return false;
-        }
+        const existingRaw = await this.subscriptionRepository.findByCarLicensePlateAndUserId(
+            normalizedPlate,
+            userId,
+        );
 
-        const existingRaw = await this.subscriptionRepository.findByCarLicensePlate(normalizedPlate);
-
-        if (!existingRaw) {
-            return false;
-        }
+        if (!existingRaw) return false;
 
         const existing = this.hydrateSubscription(existingRaw);
         return existing.isCurrentlyActive();
@@ -642,7 +375,7 @@ export class SubscriptionLifecycleService {
             return;
         }
 
-        const normalizedPlate = this.normalizePlate((car as any).licensePlate);
+        const normalizedPlate = PaymentPolicy.normalizePlate((car as any).licensePlate);
 
         if (!normalizedPlate) {
             console.warn(
@@ -651,7 +384,11 @@ export class SubscriptionLifecycleService {
             return;
         }
 
-        const subscriptionByPlateRaw = await this.subscriptionRepository.findByCarLicensePlate(normalizedPlate);
+        // ✅ REGRA NOVA: placa + userId (remove legado global)
+        const subscriptionByPlateRaw = await this.subscriptionRepository.findByCarLicensePlateAndUserId(
+            normalizedPlate,
+            userId,
+        );
 
         if (subscriptionByPlateRaw) {
             const subscriptionByPlate = this.hydrateSubscription(subscriptionByPlateRaw);
@@ -723,7 +460,9 @@ export class SubscriptionLifecycleService {
 
         const plan = await this.planRepository.findById(lastPaidPayment.planId);
         if (!plan) {
-            console.warn(`[ensureSubscriptionForUserAndCarFromExistingPayments] Plano ${lastPaidPayment.planId} não encontrado para userId=${userId}.`);
+            console.warn(
+                `[ensureSubscriptionForUserAndCarFromExistingPayments] Plano ${lastPaidPayment.planId} não encontrado para userId=${userId}.`,
+            );
             return;
         }
 
@@ -758,7 +497,7 @@ export class SubscriptionLifecycleService {
             userId,
             planId: plan.id,
             planType: plan.periodicityType,
-            amount: this.ensureMinimumAmount((lastPaidPayment as any).amount),
+            amount: PaymentPolicy.ensureMinimumAmount((lastPaidPayment as any).amount, PaymentPolicy.MINIMUM_CHARGE_AMOUNT),
             isActive,
             startDate: paymentDate,
             carId,
@@ -820,26 +559,19 @@ export class SubscriptionLifecycleService {
                 );
             }
 
-            const paymentType = this.resolvePaymentType((data as any)?.type);
+            const paymentType = this.asaasBilling.resolvePaymentType((data as any)?.type);
 
             const creditCard = paymentType === "creditCard" ? (data as any)?.creditCard : undefined;
-
-            const creditCardHolderInfo =
-                paymentType === "creditCard" ? (data as any)?.creditCardHolderInfo : undefined;
+            const creditCardHolderInfo = paymentType === "creditCard" ? (data as any)?.creditCardHolderInfo : undefined;
 
             if (billingType === ASAASSubscriptionBillingTypeEnum.CREDIT_CARD) {
-                if (!creditCard) {
-                    throw new AppError("Faltam informações cartão", 400);
-                }
-
-                if (!creditCardHolderInfo) {
-                    throw new AppError("Faltam informações do titular do cartão", 400);
-                }
+                if (!creditCard) throw new AppError("Faltam informações cartão", 400);
+                if (!creditCardHolderInfo) throw new AppError("Faltam informações do titular do cartão", 400);
             }
 
-            // ✅ Usa a data/timezone já calculadas no fluxo principal
+            // ✅ Usa a data/timezone já calculadas no fluxo principal (clamp seguro)
             const startDate = pricing.startDate;
-            const timeZoneOffsetMinutes = pricing.timeZoneOffsetMinutes;
+            const timeZoneOffsetMinutes = PaymentPolicy.resolveTimeZoneOffsetMinutes(pricing.timeZoneOffsetMinutes, -180);
 
             const expiresAt = this.calculatePlanExpiration(plan, startDate);
 
@@ -870,17 +602,17 @@ export class SubscriptionLifecycleService {
             // ⚠️ IMPORTANTE:
             // externalReference da ASSINATURA NÃO deve carregar cashback/cupom,
             // senão o webhook pode "contaminar" pagamentos futuros.
-            const subscriptionExternalReference = this.buildAsaasExternalReference({
+            const subscriptionExternalReference = PaymentPolicy.buildAsaasExternalReference({
                 userId: data.userId,
                 planId: plan.id,
                 subId: localSubscription.id,
-                minimumCharge: SubscriptionLifecycleService.MINIMUM_CHARGE_AMOUNT,
+                minimumCharge: PaymentPolicy.MINIMUM_CHARGE_AMOUNT,
                 timeZoneOffsetMinutes,
             });
 
             const payload: ASAASCreateSubscriptionDTO = {
                 customer: customerId,
-                nextDueDate: this.isoDateString(nextDueDate),
+                nextDueDate: PaymentPolicy.isoDateString(nextDueDate),
                 value: plan.price, // valor cheio sempre
                 billingType,
                 cycle,
@@ -893,9 +625,7 @@ export class SubscriptionLifecycleService {
                 (payload as any).creditCardHolderInfo = creditCardHolderInfo;
             }
 
-            console.log(
-                "[createAsaasSubscription] Criando assinatura no Asaas (valor cheio + nextDueDate próximo ciclo)...",
-            );
+            console.log("[createAsaasSubscription] Criando assinatura no Asaas (valor cheio + nextDueDate próximo ciclo)...");
             const asaasSubscription = await asaasCreateSubscription(payload, customerId);
 
             localSubscription.subscriptionIdAsaas = asaasSubscription.id;
@@ -904,7 +634,7 @@ export class SubscriptionLifecycleService {
             await this.subscriptionRepository.update(localSubscription.id, localSubscription);
 
             console.log(
-                `[createAsaasSubscription] Assinatura Asaas ${asaasSubscription.id} vinculada ao ID local ${localSubscription.id}. nextDueDate=${this.isoDateString(nextDueDate)}`,
+                `[createAsaasSubscription] Assinatura Asaas ${asaasSubscription.id} vinculada ao ID local ${localSubscription.id}. nextDueDate=${PaymentPolicy.isoDateString(nextDueDate)}`,
             );
 
             // 3) Cria a cobrança avulsa AGORA (1ª mensalidade) com cashback/cupom abatidos
@@ -913,17 +643,16 @@ export class SubscriptionLifecycleService {
                     ? ASAASPaymentBillingTypeEnum.PIX
                     : ASAASPaymentBillingTypeEnum.CREDIT_CARD;
 
-            const safeFinalAmount = this.ensureMinimumAmount(
+            const safeFinalAmount = PaymentPolicy.ensureMinimumAmount(
                 pricing.cashbackPricing.amountAfterCashback,
-                SubscriptionLifecycleService.MINIMUM_CHARGE_AMOUNT,
+                PaymentPolicy.MINIMUM_CHARGE_AMOUNT,
             );
 
-            const firstDueDateStr = this.isoDateString(startDate);
-            const firstDueAt = this.parseIsoDateToDate(firstDueDateStr) ?? startDate;
+            const firstDueDateStr = PaymentPolicy.isoDateString(startDate);
+            const firstDueAt = PaymentPolicy.parseIsoDateToDate(firstDueDateStr) ?? startDate;
 
-            // Aqui o externalReference do PAGAMENTO AVULSO pode carregar cashback/cupom
-            // porque é só essa cobrança (não afeta os próximos ciclos).
-            const firstPaymentExternalReference = this.buildAsaasExternalReference({
+            // externalReference do PAGAMENTO AVULSO pode carregar cashback/cupom
+            const firstPaymentExternalReference = PaymentPolicy.buildAsaasExternalReference({
                 userId: data.userId,
                 planId: plan.id,
                 subId: localSubscription.id,
@@ -931,7 +660,7 @@ export class SubscriptionLifecycleService {
                 cashbackUsedAmount: pricing.cashbackPricing.cashbackUsed,
                 cashbackBaseAmount: pricing.planCouponPricing.finalAmount, // base após cupom
                 cashbackRequestedAmount: pricing.requestedCashback,
-                minimumCharge: SubscriptionLifecycleService.MINIMUM_CHARGE_AMOUNT,
+                minimumCharge: PaymentPolicy.MINIMUM_CHARGE_AMOUNT,
                 timeZoneOffsetMinutes,
             });
 
@@ -963,7 +692,7 @@ export class SubscriptionLifecycleService {
                 console.log("[createAsaasSubscription] QR code PIX recuperado e pronto para o cliente.");
             }
 
-            const internalStatus = this.mapAsaasPaymentStatusToInternal(
+            const internalStatus = this.asaasBilling.mapAsaasPaymentStatusToInternal(
                 asaasFirstPayment.status as ASAASPaymentStatusEnum,
             );
 
@@ -983,14 +712,11 @@ export class SubscriptionLifecycleService {
                 pixQrCode,
                 pixPayload,
                 installments: null,
-                cashbackUsedAmount:
-                    pricing.cashbackPricing.cashbackUsed > 0 ? pricing.cashbackPricing.cashbackUsed : null,
+                cashbackUsedAmount: pricing.cashbackPricing.cashbackUsed > 0 ? pricing.cashbackPricing.cashbackUsed : null,
             } as any);
 
             if (internalStatus === "PAID") {
-                console.log(
-                    "[createAsaasSubscription] 1ª mensalidade APROVADA IMEDIATAMENTE. Ativando assinatura local.",
-                );
+                console.log("[createAsaasSubscription] 1ª mensalidade APROVADA IMEDIATAMENTE. Ativando assinatura local.");
                 await this.updateSubscriptionValidityFromPayment(localSubscription, startDate, "PAID");
                 return { subscription: localSubscription, payment: dbPayment };
             }
@@ -1006,7 +732,7 @@ export class SubscriptionLifecycleService {
     }
 
     // ---------------------------------------------------------------------
-    // Webhook de assinatura ASAAS (idêntico ao PaymentService)
+    // Webhook de assinatura ASAAS
     // ---------------------------------------------------------------------
 
     public async handleSubscriptionWebhook(
@@ -1021,8 +747,9 @@ export class SubscriptionLifecycleService {
         const event = body.event;
 
         const localSubscriptionByAsaasRaw = await this.subscriptionRepository.getByAsaasId(subscriptionAsaasId);
-
-        const localSubscriptionByAsaas = localSubscriptionByAsaasRaw ? this.hydrateSubscription(localSubscriptionByAsaasRaw) : null;
+        const localSubscriptionByAsaas = localSubscriptionByAsaasRaw
+            ? this.hydrateSubscription(localSubscriptionByAsaasRaw)
+            : null;
 
         if (!localSubscriptionByAsaas && event !== ASAASWebhookEventEnum.SUBSCRIPTION_CREATED) {
             console.log(`[handleSubscriptionWebhook] Assinatura ${subscriptionAsaasId} não encontrada localmente.`);
@@ -1033,20 +760,15 @@ export class SubscriptionLifecycleService {
             console.info(`[handleSubscriptionWebhook] SUBSCRIPTION_CREATED ${body.subscription.id}`);
 
             const externalReferenceRaw = body.subscription.externalReference ?? "";
-            let externalReferenceUserId: number | undefined;
-            let externalReferencePlanId: number | undefined;
-            let externalReferenceCouponId: number | undefined;
-            let externalReferenceSubId: number | undefined;
 
-            if (externalReferenceRaw) {
-                const parsed = this.parseAsaasExternalReference(externalReferenceRaw);
-                if (parsed) {
-                    externalReferenceUserId = parsed.userId;
-                    externalReferencePlanId = parsed.planId;
-                    externalReferenceCouponId = parsed.couponId;
-                    externalReferenceSubId = parsed.subId;
-                }
-            }
+            const parsed = externalReferenceRaw
+                ? PaymentPolicy.parseAsaasExternalReference(externalReferenceRaw)
+                : null;
+
+            const externalReferenceUserId = parsed?.userId;
+            const externalReferencePlanId = parsed?.planId;
+            const externalReferenceCouponId = parsed?.couponId;
+            const externalReferenceSubId = parsed?.subId;
 
             if (!externalReferenceUserId || !externalReferencePlanId) {
                 console.error("[handleSubscriptionWebhook] userId ou planId ausentes na referência externa.");
@@ -1085,9 +807,10 @@ export class SubscriptionLifecycleService {
             }
 
             const existingByAsaasRaw = await this.subscriptionRepository.getByAsaasId(body.subscription.id);
-
             if (existingByAsaasRaw) {
-                console.info(`[handleSubscriptionWebhook] Assinatura já existe no banco por asaasId: ${body.subscription.id}`);
+                console.info(
+                    `[handleSubscriptionWebhook] Assinatura já existe no banco por asaasId: ${body.subscription.id}`,
+                );
                 return { status: 200, message: "Assinatura já registrada" };
             }
 
@@ -1125,7 +848,9 @@ export class SubscriptionLifecycleService {
 
             await this.subscriptionRepository.update(localSubscriptionByAsaas.id, localSubscriptionByAsaas);
 
-            console.info(`[handleSubscriptionWebhook] Assinatura ${localSubscriptionByAsaas.id} desativada por cancelamento ASAAS.`);
+            console.info(
+                `[handleSubscriptionWebhook] Assinatura ${localSubscriptionByAsaas.id} desativada por cancelamento ASAAS.`,
+            );
         }
     }
 }

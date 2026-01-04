@@ -12,10 +12,25 @@ export type UpdateUserCarRepositoryDTO =
 };
 
 export interface IUserCarRepository {
-	findByLicensePlate(
+	/**
+	 * ✅ REGRA NOVA:
+	 * busca o carro do usuário pela placa (placa pode existir pra outro user).
+	 */
+	findByLicensePlateAndUserId(
 		licensePlate: string,
+		userId: number,
 		includeInactive?: boolean,
 	): Promise<UserCar | null>;
+
+	/**
+	 * (Opcional / utilitário)
+	 * Se em algum lugar do sistema você precisar buscar "todos" por placa.
+	 * Não use isso pra regra de unicidade.
+	 */
+	findManyByLicensePlate(
+		licensePlate: string,
+		includeInactive?: boolean,
+	): Promise<UserCar[]>;
 
 	findByUserId(userId: number, includeInactive?: boolean): Promise<UserCar[]>;
 

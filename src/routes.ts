@@ -17,6 +17,9 @@ import userProfile from "./modules/userProfile/routes";
 import washServiceRoutes from "./modules/wash-service/routes";
 import WashLocation from "./modules/washLocation/routes";
 
+// ✅ AdminCar (agora via index)
+
+
 // Asaas (sincronização clientes + pagamentos)
 import asaasRoutes from "./assas/asaas.routes";
 
@@ -25,6 +28,7 @@ import referralsRoutes from "./modules/referrals/routes";
 
 // ✅ Cashback (Fase 4)
 import cashbackRoutes from "./modules/cashback/routes";
+import {adminCarRoutes} from "./modules/adminCar";
 
 const routes = Router();
 
@@ -35,7 +39,12 @@ routes.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 routes.use("/auth", authRoutes);
 routes.use("/dashboard", dashboardRoutes);
 routes.use("/wash-services", washServiceRoutes);
+
 routes.use("/user-car", userCarRoutes);
+
+// ✅ Admin endpoints de carro
+routes.use("/admin-car", adminCarRoutes);
+
 routes.use("/subscription", subscription);
 routes.use("/daily-wash", dailyWashRoutes);
 routes.use("/users", users);

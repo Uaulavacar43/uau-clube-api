@@ -14,22 +14,7 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 			.replace(/[^A-Z0-9]/g, "");
 	}
 
-	async findByLicensePlate(
-		licensePlate: string,
-		includeInactive = false,
-	): Promise<UserCar | null> {
-		const normalized = this.normalizePlate(licensePlate);
-		if (!normalized) return null;
-
-		const carData = await prisma.car.findFirst({
-			where: {
-				licensePlate: normalized,
-				...(includeInactive ? {} : { deletedAt: null }),
-			},
-		});
-
-		if (!carData) return null;
-
+	private toEntity(carData: any): UserCar {
 		return new UserCar(
 			carData.id,
 			carData.licensePlate,
@@ -39,6 +24,51 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 			carData.year,
 			carData.userId,
 		);
+	}
+
+	/**
+	 * ✅ NOVO: placa por usuário
+	 */
+	async findByLicensePlateAndUserId(
+		licensePlate: string,
+		userId: number,
+		includeInactive = false,
+	): Promise<UserCar | null> {
+		const normalized = this.normalizePlate(licensePlate);
+		if (!normalized) return null;
+
+		const carData = await prisma.car.findFirst({
+			where: {
+				userId,
+				licensePlate: normalized,
+				...(includeInactive ? {} : { deletedAt: null }),
+			},
+		});
+
+		if (!carData) return null;
+		return this.toEntity(carData);
+	}
+
+	/**
+	 * (Opcional) útil pra relatórios/admin.
+	 * ⚠️ Não use pra regra de unicidade.
+	 */
+	async findManyByLicensePlate(
+		licensePlate: string,
+		includeInactive = false,
+	): Promise<UserCar[]> {
+		const normalized = this.normalizePlate(licensePlate);
+		if (!normalized) return [];
+
+		const cars = await prisma.car.findMany({
+			where: {
+				licensePlate: normalized,
+				...(includeInactive ? {} : { deletedAt: null }),
+			},
+			orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+		});
+
+		return cars.map((c) => this.toEntity(c));
 	}
 
 	async findByUserId(userId: number, includeInactive = false): Promise<UserCar[]> {
@@ -50,18 +80,7 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 			orderBy: [{ createdAt: "desc" }, { id: "desc" }],
 		});
 
-		return carData.map(
-			(car) =>
-				new UserCar(
-					car.id,
-					car.licensePlate,
-					car.color,
-					car.model,
-					car.brand,
-					car.year,
-					car.userId,
-				),
-		);
+		return carData.map((car) => this.toEntity(car));
 	}
 
 	async findById(id: number, includeInactive = false): Promise<UserCar | null> {
@@ -73,16 +92,7 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 		});
 
 		if (!carData) return null;
-
-		return new UserCar(
-			carData.id,
-			carData.licensePlate,
-			carData.color,
-			carData.model,
-			carData.brand,
-			carData.year,
-			carData.userId,
-		);
+		return this.toEntity(carData);
 	}
 
 	async create(
@@ -95,12 +105,15 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 		}
 
 		/**
-		 * IMPORTANTE:
-		 * Se existir UNIQUE no banco, placa desativada também bloqueia reuso.
-		 * Então checamos conflito SEM filtrar deletedAt.
+		 * ✅ NOVA REGRA:
+		 * conflito só existe se já houver (placa + userId).
+		 * E a checagem é sem filtrar deletedAt porque UNIQUE do banco pega ambos.
 		 */
 		const conflict = await prisma.car.findFirst({
-			where: { licensePlate: normalized },
+			where: {
+				userId: data.userId,
+				licensePlate: normalized,
+			},
 			select: { id: true, deletedAt: true },
 		});
 
@@ -126,26 +139,28 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 			},
 		});
 
-		return new UserCar(
-			createdCar.id,
-			createdCar.licensePlate,
-			createdCar.color,
-			createdCar.model,
-			createdCar.brand,
-			createdCar.year,
-			createdCar.userId,
-		);
+		return this.toEntity(createdCar);
 	}
 
 	async update(carId: number, data: UpdateUserCarRepositoryDTO): Promise<UserCar> {
 		// Admin pode atualizar inclusive inativos, então NÃO filtramos deletedAt aqui.
 		const existing = await prisma.car.findFirst({
 			where: { id: carId },
-			select: { id: true },
+			select: { id: true, userId: true, licensePlate: true },
 		});
 
 		if (!existing) {
 			throw new AppError("Carro não encontrado", 404);
+		}
+
+		// userId alvo para validação de unicidade (admin pode mudar owner)
+		const targetUserId =
+			(data as any).userId !== undefined && (data as any).userId !== null
+				? Number((data as any).userId)
+				: existing.userId;
+
+		if (!Number.isFinite(targetUserId) || targetUserId <= 0) {
+			throw new AppError("userId inválido para atualização do veículo", 400);
 		}
 
 		// 1) Normalização/validação de placa + conflito (sem filtrar deletedAt)
@@ -158,8 +173,13 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 				throw new AppError("Placa inválida", 400);
 			}
 
+			/**
+			 * ✅ NOVA REGRA:
+			 * conflito é por (placa + userId)
+			 */
 			const conflict = await prisma.car.findFirst({
 				where: {
+					userId: targetUserId,
 					licensePlate: plateCandidate,
 					NOT: { id: carId },
 				},
@@ -192,7 +212,7 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 		if (data.year !== undefined) updateData.year = data.year;
 
 		// ADMIN features
-		if ((data as any).userId !== undefined) updateData.userId = (data as any).userId;
+		if ((data as any).userId !== undefined) updateData.userId = targetUserId;
 
 		// deletedAt pode ser Date (desativar) OU null (reativar). Só ignora se for undefined.
 		if (data.deletedAt !== undefined) updateData.deletedAt = data.deletedAt;
@@ -202,15 +222,7 @@ export class PrismaUserCarRepository implements IUserCarRepository {
 			data: updateData,
 		});
 
-		return new UserCar(
-			updatedCar.id,
-			updatedCar.licensePlate,
-			updatedCar.color,
-			updatedCar.model,
-			updatedCar.brand,
-			updatedCar.year,
-			updatedCar.userId,
-		);
+		return this.toEntity(updatedCar);
 	}
 
 	async delete(carId: number): Promise<void> {

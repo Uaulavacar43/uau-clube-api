@@ -22,7 +22,7 @@ export class SubscriptionService {
     ) {}
 
     // ---------------------------------------------------------------------
-    // Hydration helpers (garante entidade com métodos de domínio)
+    // Helpers
     // ---------------------------------------------------------------------
 
     private toDate(value: unknown): Date | null {
@@ -33,24 +33,31 @@ export class SubscriptionService {
         return Number.isNaN(d.getTime()) ? null : d;
     }
 
+    private ensurePositiveId(value: unknown, label: string): number {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) {
+            throw new AppError(`${label} inválido`, 400);
+        }
+        return n;
+    }
+
+    private normalizePlate(value: unknown): string {
+        if (typeof value !== "string") return "";
+        return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    }
+
     /**
      * Converte um "raw" (retorno de ORM) em instância de Subscription,
      * garantindo disponibilidade de métodos de domínio.
      */
     private hydrateSubscription(raw: any): Subscription {
-        if (raw instanceof Subscription) {
-            return raw;
-        }
+        if (raw instanceof Subscription) return raw;
 
         const createdAt = this.toDate(raw?.createdAt) ?? new Date();
-        const startDate =
-            this.toDate(raw?.startDate) ??
-            this.toDate(raw?.createdAt) ??
-            new Date();
+        const startDate = this.toDate(raw?.startDate) ?? this.toDate(raw?.createdAt) ?? new Date();
 
         const subscriptionStatus =
-            raw?.subscriptionStatus ??
-            (raw?.isActive ? "ACTIVE" : "SUSPENDED");
+            raw?.subscriptionStatus ?? (raw?.isActive ? "ACTIVE" : "SUSPENDED");
 
         return new Subscription({
             id: raw?.id ?? 0,
@@ -80,21 +87,10 @@ export class SubscriptionService {
     // Cancelamento
     // ---------------------------------------------------------------------
 
-    /**
-     * Cancelamento de assinatura:
-     * - Para plano recorrente (plan.isPackage = false):
-     *   - Se existir subscriptionIdAsaas, cancela no ASAAS para impedir novas cobranças.
-     *   - Se NÃO existir subscriptionIdAsaas, avisa o admin (inconsistência / migração / falha de vínculo).
-     * - Para pacote (plan.isPackage = true):
-     *   - Não existe assinatura recorrente no ASAAS para cancelar (normalmente é cobrança avulsa/pagamento).
-     *
-     * Importante:
-     * - Cancelamento é idempotente: se já estiver cancelada, não falha.
-     * - Regra de negócio NÃO deve depender de `isActive` como fonte de verdade.
-     */
     public async cancelSubscription(subscriptionId: number): Promise<void> {
-        const rawSubscription =
-            await this.subscriptionRepository.findById(subscriptionId);
+        this.ensurePositiveId(subscriptionId, "subscriptionId");
+
+        const rawSubscription = await this.subscriptionRepository.findById(subscriptionId);
 
         if (!rawSubscription) {
             throw new AppError("Assinatura não encontrada", 404);
@@ -118,8 +114,7 @@ export class SubscriptionService {
 
         const asaasId = subscription.subscriptionIdAsaas;
 
-        // Recorrente: tenta cancelar no ASAAS (se possível).
-        // Se não houver vínculo ASAAS e a assinatura ainda não estiver cancelada, avisa admin.
+        // Recorrente: cancela no ASAAS quando houver vínculo
         if (!plan.isPackage) {
             if (!asaasId) {
                 if (!subscription.isCanceled()) {
@@ -135,13 +130,11 @@ export class SubscriptionService {
                     });
                 }
             } else {
-                // Mesmo se já cancelada localmente, manter tentativa de cancelamento ASAAS é aceitável.
-                // Se ASAAS já estiver cancelada, tende a ser idempotente do lado de lá.
                 await asaasCancelSubscription(asaasId);
             }
         }
 
-        // Local: sempre marca como cancelada/inativa (repository deve ser idempotente).
+        // Local: idempotente
         await this.subscriptionRepository.cancel(subscriptionId);
     }
 
@@ -149,25 +142,14 @@ export class SubscriptionService {
     // Atualização (vínculo de veículo)
     // ---------------------------------------------------------------------
 
-    /**
-     * Atualiza uma assinatura existente (vínculo de veículo).
-     * Regras:
-     * - A assinatura deve existir.
-     * - O carro deve existir.
-     * - O carro deve pertencer ao mesmo usuário da assinatura.
-     * - O carro não pode já ter outra assinatura ATIVA (diferente desta) vinculada.
-     *
-     * Importante:
-     * - "Ativa" aqui é decidido por regra de domínio:
-     *   subscriptionStatus === "ACTIVE" e expiresAt > now.
-     * - Não depende do campo persistido `isActive`, que pode estar inconsistente em legado/migração.
-     */
     public async updateSubscription(
         subscriptionId: number,
         data: UpdateSubscriptionDTO,
     ): Promise<Subscription> {
-        const rawSubscription =
-            await this.subscriptionRepository.findById(subscriptionId);
+        this.ensurePositiveId(subscriptionId, "subscriptionId");
+        this.ensurePositiveId(data?.carId, "carId");
+
+        const rawSubscription = await this.subscriptionRepository.findById(subscriptionId);
 
         if (!rawSubscription) {
             throw new AppError("Assinatura não encontrada", 404);
@@ -188,24 +170,23 @@ export class SubscriptionService {
             );
         }
 
-        // Proteção: não permite vincular a assinatura a um carro que já tenha assinatura ativa diferente
-        // (evita duplicidade de direito de uso por placa).
+        const normalizedPlate = this.normalizePlate(car.licensePlate);
+        if (!normalizedPlate) {
+            throw new AppError("Veículo com placa inválida", 400);
+        }
+
+        // ✅ REGRA NOVA: placa é única por usuário
         const existingForCarRaw =
-            await this.subscriptionRepository.findByCarLicensePlate(
-                car.licensePlate,
+            await this.subscriptionRepository.findByCarLicensePlateAndUserId(
+                normalizedPlate,
+                car.userId,
             );
 
         if (existingForCarRaw) {
             const existingForCar = this.hydrateSubscription(existingForCarRaw);
 
-            if (
-                existingForCar.id !== subscription.id &&
-                existingForCar.isCurrentlyActive()
-            ) {
-                throw new AppError(
-                    "Este veículo já possui uma assinatura ativa vinculada",
-                    400,
-                );
+            if (existingForCar.id !== subscription.id && existingForCar.isCurrentlyActive()) {
+                throw new AppError("Este veículo já possui uma assinatura ativa vinculada", 400);
             }
         }
 
@@ -220,11 +201,9 @@ export class SubscriptionService {
     // Listagem
     // ---------------------------------------------------------------------
 
-    /**
-     * Lista assinaturas do usuário (incluindo car quando includeCars=true).
-     * Retorna instâncias de domínio (com métodos).
-     */
     public async listSubscriptions(userId: number): Promise<Subscription[]> {
+        this.ensurePositiveId(userId, "userId");
+
         const raw = await this.subscriptionRepository.findByUserId(userId, true);
         return raw.map((s: any) => this.hydrateSubscription(s));
     }

@@ -1,3 +1,5 @@
+// src/repositories/interfaces/ICashbackTransactionRepository.ts
+
 import type { Prisma, TransactionSource, TransactionType } from "@prisma/client";
 import type { CashbackTransaction } from "../../entities/CashbackTransaction";
 
@@ -21,6 +23,12 @@ export interface ICashbackTransactionRepository {
     create(data: CashbackTransactionCreateInput): Promise<CashbackTransaction>;
 
     existsByEventKey(eventKey: string): Promise<boolean>;
+
+    /**
+     * ✅ novo: idempotência perfeita.
+     * quando já existir, pega a transação real (e o amount real) do banco.
+     */
+    findByEventKey(eventKey: string): Promise<CashbackTransaction | null>;
 
     findByUserId(userId: number): Promise<CashbackTransaction[]>;
 }

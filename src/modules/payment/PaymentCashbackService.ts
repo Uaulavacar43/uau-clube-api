@@ -1,23 +1,25 @@
-// src/modules/payment/services/CashbackService.ts
+// src/modules/payment/services/PaymentCashbackService.ts
 
 import { AppError } from "../../error/AppError";
-
 import prisma from "../../config/dbConfig";
 import { TransactionSource, TransactionType, WalletType } from "@prisma/client";
 
 import { PaymentPolicy } from "./PaymentPolicy";
 
+// ajuste o caminho se tua pasta for diferente
+import { CashbackPolicy, type TxLike } from "../cashback/CashbackPolicy";
+
 /**
- * Serviço responsável por regras de Cashback (FASE 4):
- * - Saldo disponível = earned (não expirado) - used
- * - Respeita expiração (expiresAt)
- * - Regra: cashback máximo = 50% do total (após cupom)
- * - Regra: não pode reduzir abaixo do mínimo de cobrança
- * - NÃO debita no create (apenas calcula e retorna cashbackUsed)
- * - Debita APENAS quando pagamento for PAID (webhook), de forma idempotente
+ * Serviço responsável por regras de Cashback no módulo Payment:
+ * - Resolve uso no CREATE (não debita, só calcula cashbackUsed)
+ * - Débito idempotente no webhook PAID
+ * - Crédito idempotente no webhook PAID (quando aplicável)
+ *
+ * Fonte da verdade para saldo/expiração/normalização: CashbackPolicy
  *
  * IMPORTANTE:
- * Este serviço foi extraído do PaymentService e deve manter a lógica 100% idêntica.
+ * Este serviço foi extraído do PaymentService e deve manter a lógica 100% idêntica,
+ * apenas removendo repetição e conflitos de responsabilidade.
  */
 export class PaymentCashbackService {
     public async computeCashbackAvailability(
@@ -38,35 +40,14 @@ export class PaymentCashbackService {
             },
         });
 
-        let earnedValid = 0;
-        let earnedExpired = 0;
-        let usedTotal = 0;
+        const txs: TxLike[] = rows.map((r) => ({
+            type: r.type,
+            amount: r.amount,
+            expiresAt: r.expiresAt,
+            eventKey: null,
+        }));
 
-        for (const tx of rows) {
-            const amount = Number(tx.amount ?? 0);
-
-            if (tx.type === TransactionType.EARNED) {
-                const expiresAt = tx.expiresAt ? new Date(tx.expiresAt) : null;
-                const isExpired = expiresAt ? expiresAt.getTime() <= now.getTime() : false;
-
-                if (isExpired) earnedExpired += amount;
-                else earnedValid += amount;
-            }
-
-            if (tx.type === TransactionType.USED) {
-                usedTotal += amount;
-            }
-        }
-
-        const rawAvailable = earnedValid - usedTotal;
-        const availableBalance = rawAvailable < 0 ? 0 : Number(rawAvailable.toFixed(2));
-
-        return {
-            earnedValid: Number(earnedValid.toFixed(2)),
-            earnedExpired: Number(earnedExpired.toFixed(2)),
-            usedTotal: Number(usedTotal.toFixed(2)),
-            availableBalance,
-        };
+        return CashbackPolicy.computeBalance(txs, now);
     }
 
     public async getOrCreateInternalWalletByUserId(userId: number): Promise<{
@@ -110,7 +91,7 @@ export class PaymentCashbackService {
      * - limita cashback em 50% do total (após cupom)
      * - usa saldo disponível real (earned válido - used), respeitando expiresAt
      *
-     * Importante: aqui NÃO debita do wallet (apenas calcula e persiste em Payment.cashbackUsedAmount).
+     * Aqui NÃO debita do wallet. Apenas calcula e retorna cashbackUsed/amountAfterCashback.
      * O débito acontece no webhook quando PAID (idempotente).
      */
     public async resolveCashbackUsageOrThrow(params: {
@@ -157,7 +138,6 @@ export class PaymentCashbackService {
         // Regra 2: 50% do total (após cupom)
         const maxByRule50 = Math.max(0, amountAfterCoupon * 0.5);
 
-        // Limite final
         const maxAllowed = Math.min(maxByMinCharge, maxByRule50);
 
         if (maxAllowed <= 0) {
@@ -169,7 +149,8 @@ export class PaymentCashbackService {
             };
         }
 
-        const cashbackUsed = Math.min(availability.availableBalance, requested, maxAllowed);
+        const cashbackUsedRaw = Math.min(availability.availableBalance, requested, maxAllowed);
+        const cashbackUsed = Number(cashbackUsedRaw.toFixed(2));
 
         if (cashbackUsed <= 0) {
             return {
@@ -186,11 +167,22 @@ export class PaymentCashbackService {
         );
 
         return {
-            cashbackUsed: Number(cashbackUsed.toFixed(2)),
+            cashbackUsed,
             amountAfterCashback,
             wallet: { id: wallet.id, balance: wallet.balance },
             availableBalance: availability.availableBalance,
         };
+    }
+
+    // ---------------------------------------------------------------------
+    // Event keys padronizados
+    // ---------------------------------------------------------------------
+    private debitEventKeyFromAsaas(paymentIdAsaas: string) {
+        return `CASHBACK:DEBIT:ASAAS:${paymentIdAsaas}`;
+    }
+
+    private earnEventKeyFromAsaas(paymentIdAsaas: string) {
+        return `CASHBACK:EARN:ASAAS:${paymentIdAsaas}`;
     }
 
     /**
@@ -206,10 +198,10 @@ export class PaymentCashbackService {
         paymentIdLocal?: number | null;
         meta?: Record<string, any>;
     }): Promise<void> {
-        const amountToDebit = PaymentPolicy.parseCashbackAmount(params.amount);
+        const amountToDebit = CashbackPolicy.normalizeMoney(params.amount);
         if (amountToDebit <= 0) return;
 
-        const eventKey = `CASHBACK_DEBIT:ASAAS_PAYMENT:${params.paymentIdAsaas}`;
+        const eventKey = this.debitEventKeyFromAsaas(params.paymentIdAsaas);
 
         await prisma.$transaction(async (tx) => {
             const wallet = await tx.cashbackWallet.upsert({
@@ -236,9 +228,7 @@ export class PaymentCashbackService {
                 select: { id: true },
             });
 
-            if (existingTx) {
-                return;
-            }
+            if (existingTx) return;
 
             const now = new Date();
 
@@ -251,28 +241,19 @@ export class PaymentCashbackService {
                 },
             });
 
-            let earnedValid = 0;
-            let usedTotal = 0;
-
-            for (const t of userTxs) {
-                const a = Number(t.amount ?? 0);
-
-                if (t.type === TransactionType.EARNED) {
-                    const expiresAt = t.expiresAt ? new Date(t.expiresAt) : null;
-                    const isExpired = expiresAt ? expiresAt.getTime() <= now.getTime() : false;
-                    if (!isExpired) earnedValid += a;
-                }
-
-                if (t.type === TransactionType.USED) {
-                    usedTotal += a;
-                }
-            }
-
-            const availableBalance = Math.max(0, earnedValid - usedTotal);
+            const balance = CashbackPolicy.computeBalance(
+                userTxs.map((t) => ({
+                    type: t.type,
+                    amount: t.amount,
+                    expiresAt: t.expiresAt,
+                    eventKey: null,
+                })),
+                now,
+            );
 
             const walletBalance = Number(wallet.balance ?? 0);
 
-            if (availableBalance < amountToDebit) {
+            if (balance.availableBalance < amountToDebit) {
                 throw new AppError(
                     "Saldo de cashback insuficiente (saldo disponível real) para debitar no pagamento confirmado",
                     409,
@@ -311,19 +292,11 @@ export class PaymentCashbackService {
         });
     }
 
-    // =====================================================================
-    // MÉTODOS QUE COSTUMAM FALTAR AO EXTRAIR DO PaymentService
-    // =====================================================================
-
     /**
      * Crédito idempotente de cashback (EARNED) no PAID:
      * - Incrementa wallet INTERNAL
      * - Cria CashbackTransaction.EARNED com expiresAt opcional
-     * - Usa eventKey único por paymentIdAsaas (idempotência)
-     *
-     * IMPORTANTE:
-     * - Não fixei TransactionSource porque depende do teu enum no schema.prisma.
-     *   Você passa o `source` existente no seu projeto (ex.: SUBSCRIPTION_CREDIT, SUBSCRIPTION_EARN, etc.)
+     * - Usa eventKey único por paymentIdAsaas
      */
     public async creditCashbackEarnedIdempotentOnPaid(params: {
         userId: number;
@@ -334,10 +307,10 @@ export class PaymentCashbackService {
         expiresAt?: Date | null;
         meta?: Record<string, any>;
     }): Promise<void> {
-        const amountToCredit = PaymentPolicy.parseCashbackAmount(params.amount);
+        const amountToCredit = CashbackPolicy.normalizeMoney(params.amount);
         if (amountToCredit <= 0) return;
 
-        const eventKey = `CASHBACK_EARN:ASAAS_PAYMENT:${params.paymentIdAsaas}`;
+        const eventKey = this.earnEventKeyFromAsaas(params.paymentIdAsaas);
 
         await prisma.$transaction(async (tx) => {
             const wallet = await tx.cashbackWallet.upsert({
@@ -355,7 +328,6 @@ export class PaymentCashbackService {
                 },
                 select: {
                     id: true,
-                    balance: true,
                 },
             });
 
@@ -364,9 +336,7 @@ export class PaymentCashbackService {
                 select: { id: true },
             });
 
-            if (existingTx) {
-                return;
-            }
+            if (existingTx) return;
 
             await tx.cashbackWallet.update({
                 where: { id: wallet.id },
@@ -397,12 +367,8 @@ export class PaymentCashbackService {
     }
 
     /**
-     * (Opcional, mas MUITO útil) Rebuild do saldo da wallet INTERNAL a partir
-     * das transações:
-     * - balance = SUM(EARNED) - SUM(USED)
-     * - respeita expiração no cálculo (só EARNED não expirado entra)
-     *
-     * Use isso pra “corrigir bug” quando wallet divergir das transações.
+     * Rebuild do saldo da wallet INTERNAL a partir das transações:
+     * - balance = SUM(EARNED não expirado) - SUM(USED)
      */
     public async rebuildInternalWalletBalanceFromTransactions(params: {
         userId: number;
@@ -438,31 +404,22 @@ export class PaymentCashbackService {
                 },
             });
 
-            let earnedValid = 0;
-            let usedTotal = 0;
-
-            for (const r of rows) {
-                const a = Number(r.amount ?? 0);
-
-                if (r.type === TransactionType.EARNED) {
-                    const expiresAt = r.expiresAt ? new Date(r.expiresAt) : null;
-                    const isExpired = expiresAt ? expiresAt.getTime() <= now.getTime() : false;
-                    if (!isExpired) earnedValid += a;
-                }
-
-                if (r.type === TransactionType.USED) {
-                    usedTotal += a;
-                }
-            }
-
-            const newBalance = Math.max(0, Number((earnedValid - usedTotal).toFixed(2)));
+            const balance = CashbackPolicy.computeBalance(
+                rows.map((r) => ({
+                    type: r.type,
+                    amount: r.amount,
+                    expiresAt: r.expiresAt,
+                    eventKey: null,
+                })),
+                now,
+            );
 
             await tx.cashbackWallet.update({
                 where: { id: wallet.id },
-                data: { balance: newBalance },
+                data: { balance: balance.availableBalance },
             });
 
-            return { walletId: wallet.id, newBalance };
+            return { walletId: wallet.id, newBalance: balance.availableBalance };
         });
     }
 }

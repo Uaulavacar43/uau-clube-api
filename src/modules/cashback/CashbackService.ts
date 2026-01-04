@@ -1,14 +1,24 @@
+// src/modules/cashback/services/CashbackService.ts
+
 import { AppError } from "../../error/AppError";
 import { TransactionSource, TransactionType } from "@prisma/client";
+
 import type { ReferralBonus } from "../../entities/ReferralBonus";
 import type { CashbackTransaction } from "../../entities/CashbackTransaction";
+
 import type { ICashbackWalletRepository } from "../../repositories/interfaces/ICashbackWalletRepository";
-import type { ICashbackTransactionRepository } from "../../repositories/interfaces/ICashbackTransactionRepository";
+import type {
+    ICashbackTransactionRepository,
+    CashbackTransactionCreateInput,
+} from "../../repositories/interfaces/ICashbackTransactionRepository";
 
 import { CashbackBalanceDTO } from "./dto/CashbackBalanceDTO";
 import { ListCashbackTransactionsDTO } from "./dto/ListCashbackTransactionsDTO";
 import { CreditCashbackDTO } from "./dto/CreditCashbackDTO";
 import { DebitCashbackDTO } from "./dto/DebitCashbackDTO";
+
+// ajuste o caminho conforme tua estrutura (vc disse: está na pasta cashback)
+import { CashbackPolicy, type TxLike } from "./CashbackPolicy";
 
 export class CashbackService {
     constructor(
@@ -17,84 +27,54 @@ export class CashbackService {
     ) {}
 
     // ------------------------------------------------------------------
-    // HELPERS (regras centrais)
+    // EVENT KEYS PADRÃO
     // ------------------------------------------------------------------
 
     /**
-     * Normaliza valores monetários vindos do Prisma/DTOs (number | string | Decimal).
-     * - Garante number finito
-     * - Arredonda para 2 casas
-     * - Não permite negativos (cashback é sempre >= 0)
+     * ✅ padrão para débito usando paymentId LOCAL (quando o fluxo é interno).
+     * (no webhook ASAAS o ideal é outro eventKey baseado em paymentIdAsaas)
      */
-    private normalizeMoney(value: unknown): number {
-        const n = Number(value);
-        if (!Number.isFinite(n)) return 0;
-        if (n <= 0) return 0;
-        return Number(n.toFixed(2));
+    private debitEventKeyFromLocalPayment(paymentId: number, userId: number) {
+        return `CASHBACK:DEBIT:PAYMENT:${paymentId}:USER:${userId}`;
     }
 
-    private toDate(value: unknown): Date | null {
-        if (!value) return null;
-        if (value instanceof Date) {
-            return Number.isNaN(value.getTime()) ? null : value;
-        }
-
-        const d = new Date(value as any);
-        return Number.isNaN(d.getTime()) ? null : d;
+    private welcomeEventKey(userId: number) {
+        return `CASHBACK:WELCOME:USER:${userId}`;
     }
 
-    private isExpired(tx: CashbackTransaction, now: Date): boolean {
-        const expiresAt = this.toDate((tx as any)?.expiresAt);
-        if (!expiresAt) return false;
-        return expiresAt.getTime() <= now.getTime();
-    }
-
-    private async computeBalance(userId: number, now: Date): Promise<{
+    // ------------------------------------------------------------------
+    // BALANCE (fonte: CashbackPolicy)
+    // ------------------------------------------------------------------
+    private async computeBalance(
+        userId: number,
+        now: Date,
+    ): Promise<{
         earnedValid: number;
         earnedExpired: number;
         usedTotal: number;
         availableBalance: number;
-        allTransactions: CashbackTransaction[];
+        all: CashbackTransaction[];
     }> {
         const all = await this.txRepo.findByUserId(userId);
 
-        let earnedValid = 0;
-        let earnedExpired = 0;
-        let usedTotal = 0;
+        const txs: TxLike[] = all.map((t) => ({
+            type: t.type,
+            amount: (t as any)?.amount,
+            expiresAt: (t as any)?.expiresAt,
+            eventKey: (t as any)?.eventKey ?? null,
+        }));
 
-        for (const tx of all) {
-            const amount = this.normalizeMoney((tx as any)?.amount);
-
-            if (tx.type === TransactionType.EARNED) {
-                if (this.isExpired(tx, now)) earnedExpired += amount;
-                else earnedValid += amount;
-            }
-
-            if (tx.type === TransactionType.USED) {
-                usedTotal += amount;
-            }
-        }
-
-        earnedValid = Number(earnedValid.toFixed(2));
-        earnedExpired = Number(earnedExpired.toFixed(2));
-        usedTotal = Number(usedTotal.toFixed(2));
-
-        const rawAvailable = earnedValid - usedTotal;
-        const availableBalance = rawAvailable < 0 ? 0 : Number(rawAvailable.toFixed(2));
+        const balance = CashbackPolicy.computeBalance(txs, now);
 
         return {
-            earnedValid,
-            earnedExpired,
-            usedTotal,
-            availableBalance,
-            allTransactions: all,
+            ...balance,
+            all,
         };
     }
 
     // ------------------------------------------------------------------
     // Crédito por indicação (ReferralBonus -> Cashback)
     // ------------------------------------------------------------------
-
     public async creditFromReferralBonus(bonus: ReferralBonus): Promise<void> {
         if (bonus.paymentStatus !== "PAID") {
             throw new AppError("ReferralBonus não está PAID.", 400);
@@ -104,7 +84,7 @@ export class CashbackService {
             throw new AppError("ReferralBonus sem eventKey.", 500);
         }
 
-        const amount = this.normalizeMoney((bonus as any)?.amount);
+        const amount = CashbackPolicy.normalizeMoney((bonus as any)?.amount);
         if (amount <= 0) {
             throw new AppError("ReferralBonus com amount inválido.", 400);
         }
@@ -114,7 +94,7 @@ export class CashbackService {
 
         const wallet = await this.walletRepo.getOrCreateInternalWallet(bonus.receiverId);
 
-        await this.txRepo.create({
+        const createInput: CashbackTransactionCreateInput = {
             userId: bonus.receiverId,
             type: TransactionType.EARNED,
             source: TransactionSource.INDICATION,
@@ -128,23 +108,26 @@ export class CashbackService {
                 competence: bonus.competenceYearMonth ?? null,
             },
             expiresAt: null,
-        });
+        };
 
+        await this.txRepo.create(createInput);
         await this.walletRepo.incrementBalance(wallet.id, amount);
     }
 
     // ------------------------------------------------------------------
-    // Welcome bonus (expira em 7 dias)
+    // Welcome bonus (expira em 7 dias por padrão)
     // ------------------------------------------------------------------
-
     public async creditWelcomeBonus(params: {
         userId: number;
         amount: number;
         validDays?: number;
     }): Promise<void> {
-        const { userId } = params;
+        const userId = Number(params.userId);
+        if (!Number.isFinite(userId) || userId <= 0) {
+            throw new AppError("userId inválido para welcome bonus.", 400);
+        }
 
-        const amount = this.normalizeMoney(params.amount);
+        const amount = CashbackPolicy.normalizeMoney(params.amount);
         if (amount <= 0) {
             throw new AppError("Welcome bonus inválido.", 400);
         }
@@ -153,7 +136,7 @@ export class CashbackService {
         const now = new Date();
         const expiresAt = new Date(now.getTime() + validDays * 24 * 60 * 60 * 1000);
 
-        const eventKey = `WELCOME_BONUS:USER:${userId}`;
+        const eventKey = this.welcomeEventKey(userId);
 
         const exists = await this.txRepo.existsByEventKey(eventKey);
         if (exists) return;
@@ -174,11 +157,11 @@ export class CashbackService {
             userId: dto.userId,
             type: dto.type,
             source: dto.source,
-            amount: this.normalizeMoney(dto.amount),
+            amount: CashbackPolicy.normalizeMoney(dto.amount),
             relatedId: dto.relatedId,
             eventKey: dto.eventKey,
-            meta: dto.meta, // undefined se não tiver
-            expiresAt: dto.expiresAt,
+            meta: dto.meta ?? null,
+            expiresAt: dto.expiresAt ?? null,
         });
 
         await this.walletRepo.incrementBalance(wallet.id, amount);
@@ -187,7 +170,6 @@ export class CashbackService {
     // ------------------------------------------------------------------
     // Consultas
     // ------------------------------------------------------------------
-
     public async getBalanceByUserId(userId: number): Promise<CashbackBalanceDTO> {
         const now = new Date();
         const wallet = await this.walletRepo.getByUserId(userId);
@@ -223,7 +205,7 @@ export class CashbackService {
             ? txs
             : txs.filter((tx) => {
                 if (tx.type !== TransactionType.EARNED) return true;
-                return !this.isExpired(tx, now);
+                return !CashbackPolicy.isExpired((tx as any)?.expiresAt, now);
             });
 
         return ListCashbackTransactionsDTO.from({
@@ -234,15 +216,100 @@ export class CashbackService {
     }
 
     // ------------------------------------------------------------------
-    // Débito (regra 50% + expiração + idempotência)
+    // Resolve uso no CREATE (mínimo + 50% + pós cupom) ✅ (sem débito)
     // ------------------------------------------------------------------
+    public async resolveUsageForCharge(params: {
+        userId: number;
+        requestedCashback: number;
+        amountAfterCoupon: number;
+        minimumCharge: number;
+    }): Promise<{
+        cashbackUsed: number;
+        amountAfterCashback: number;
+        wallet: { id: number; balance: number };
+        availableBalance: number;
+    }> {
+        const userId = Number(params.userId);
+        if (!Number.isFinite(userId) || userId <= 0) {
+            throw new AppError("userId inválido para cálculo de cashback.", 400);
+        }
 
+        const requested = CashbackPolicy.normalizeMoney(params.requestedCashback);
+        const minimumCharge = Math.max(0, Number(params.minimumCharge ?? 0));
+        const amountAfterCouponRaw = Math.max(0, Number(params.amountAfterCoupon ?? 0));
+
+        if (requested <= 0) {
+            return {
+                cashbackUsed: 0,
+                amountAfterCashback: amountAfterCouponRaw,
+                wallet: { id: 0, balance: 0 },
+                availableBalance: 0,
+            };
+        }
+
+        const wallet = await this.walletRepo.getOrCreateInternalWallet(userId);
+
+        const now = new Date();
+        const { availableBalance } = await this.computeBalance(userId, now);
+
+        if (availableBalance <= 0) {
+            throw new AppError("Saldo de cashback indisponível", 400);
+        }
+
+        // garante que a base do cálculo respeita o mínimo
+        const amountAfterCoupon = Math.max(amountAfterCouponRaw, minimumCharge);
+
+        // Regra 1: não pode reduzir abaixo do mínimo
+        const maxByMinCharge = Math.max(0, amountAfterCoupon - minimumCharge);
+
+        // Regra 2: até 50% do total pós cupom
+        const maxByRule50 = Math.max(0, amountAfterCoupon * 0.5);
+
+        const maxAllowed = Math.min(maxByMinCharge, maxByRule50);
+
+        if (maxAllowed <= 0) {
+            return {
+                cashbackUsed: 0,
+                amountAfterCashback: amountAfterCoupon,
+                wallet: { id: wallet.id, balance: Number((wallet as any)?.balance ?? 0) },
+                availableBalance,
+            };
+        }
+
+        const cashbackUsed = Number(Math.min(availableBalance, requested, maxAllowed).toFixed(2));
+
+        if (cashbackUsed <= 0) {
+            return {
+                cashbackUsed: 0,
+                amountAfterCashback: amountAfterCoupon,
+                wallet: { id: wallet.id, balance: Number((wallet as any)?.balance ?? 0) },
+                availableBalance,
+            };
+        }
+
+        const amountAfterCashback = Math.max(
+            minimumCharge,
+            Number((amountAfterCoupon - cashbackUsed).toFixed(2)),
+        );
+
+        return {
+            cashbackUsed,
+            amountAfterCashback,
+            wallet: { id: wallet.id, balance: Number((wallet as any)?.balance ?? 0) },
+            availableBalance,
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // Débito no PAID (idempotente pelo paymentId local) ✅
+    // Regra aqui: APENAS até 50% por uso (sem regra de mínimo)
+    // ------------------------------------------------------------------
     public async debitForPayment(dto: DebitCashbackDTO): Promise<number> {
         const userId = Number((dto as any)?.userId);
         const paymentId = Number((dto as any)?.paymentId);
 
-        const requestedAmount = this.normalizeMoney((dto as any)?.requestedAmount);
-        const paymentTotal = this.normalizeMoney((dto as any)?.paymentTotal);
+        const requestedAmount = CashbackPolicy.normalizeMoney((dto as any)?.requestedAmount);
+        const paymentTotal = CashbackPolicy.normalizeMoney((dto as any)?.paymentTotal);
 
         if (!Number.isFinite(userId) || userId <= 0) {
             throw new AppError("userId inválido para débito de cashback.", 400);
@@ -258,25 +325,24 @@ export class CashbackService {
             throw new AppError("paymentTotal inválido para aplicar regra de 50%.", 400);
         }
 
-        const wallet = await this.walletRepo.getByUserId(userId);
-        if (!wallet) throw new AppError("Carteira de cashback não encontrada.", 404);
+        const wallet = await this.walletRepo.getOrCreateInternalWallet(userId);
 
         const now = new Date();
-        const { availableBalance, allTransactions } = await this.computeBalance(userId, now);
+        const { availableBalance } = await this.computeBalance(userId, now);
 
-        const maxAllowed = Number((paymentTotal * 0.5).toFixed(2));
+        const maxAllowedByRule50 = Number((paymentTotal * 0.5).toFixed(2));
         const allowed = Number(
-            Math.min(requestedAmount, availableBalance, maxAllowed).toFixed(2),
+            Math.min(requestedAmount, availableBalance, maxAllowedByRule50).toFixed(2),
         );
 
         if (allowed <= 0) return 0;
 
-        const eventKey = `DEBIT:PAYMENT:${paymentId}:USER:${userId}`;
+        const eventKey = this.debitEventKeyFromLocalPayment(paymentId, userId);
 
-        const alreadyUsed = await this.txRepo.existsByEventKey(eventKey);
-        if (alreadyUsed) {
-            const existing = allTransactions.find((t) => t.eventKey === eventKey);
-            return this.normalizeMoney((existing as any)?.amount);
+        // ✅ idempotência perfeita: retorna o amount REAL já registrado
+        const existing = await this.txRepo.findByEventKey(eventKey);
+        if (existing) {
+            return CashbackPolicy.normalizeMoney((existing as any)?.amount);
         }
 
         await this.txRepo.create({
@@ -290,7 +356,7 @@ export class CashbackService {
                 paymentId,
                 reason: "Pagamento com cashback",
                 requestedAmount,
-                allowedByRule50: maxAllowed,
+                allowedByRule50: maxAllowedByRule50,
                 availableBalanceBefore: availableBalance,
             },
             expiresAt: null,
