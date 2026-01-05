@@ -15,6 +15,83 @@ import { PrismaSubscriptionRepository } from "../../repositories/implementations
 
 import { AdminUpdateCarDTO } from "./dto/AdminUpdateCarDTO";
 
+/**
+ * @openapi
+ * tags:
+ *   - name: AdminCar
+ *     description: Rotas administrativas para gestão de veículos de usuários
+ *
+ * components:
+ *   securitySchemes:
+ *     bearerAuth:
+ *       type: http
+ *       scheme: bearer
+ *       bearerFormat: JWT
+ *
+ *   schemas:
+ *     ErrorResponse:
+ *       type: object
+ *       properties:
+ *         message:
+ *           type: string
+ *           example: Payload inválido
+ *         statusCode:
+ *           type: number
+ *           example: 400
+ *
+ *     AdminCar:
+ *       type: object
+ *       description: Representação genérica de um carro vinculado a um usuário (ajuste conforme teu model real)
+ *       properties:
+ *         id:
+ *           type: integer
+ *           example: 123
+ *         userId:
+ *           type: integer
+ *           example: 45
+ *         licensePlate:
+ *           type: string
+ *           example: ABC1D23
+ *         isActive:
+ *           type: boolean
+ *           example: true
+ *         createdAt:
+ *           type: string
+ *           format: date-time
+ *           example: 2026-01-01T10:00:00.000Z
+ *         updatedAt:
+ *           type: string
+ *           format: date-time
+ *           example: 2026-01-02T12:30:00.000Z
+ *
+ *     AdminUpdateCarDTO:
+ *       type: object
+ *       description: Payload para atualização administrativa de veículo (ajuste para refletir o DTO real)
+ *       additionalProperties: true
+ *       properties:
+ *         carId:
+ *           type: integer
+ *           example: 123
+ *         userId:
+ *           type: integer
+ *           example: 45
+ *         licensePlate:
+ *           type: string
+ *           example: ABC1D23
+ *         brand:
+ *           type: string
+ *           example: Toyota
+ *         model:
+ *           type: string
+ *           example: Corolla
+ *         year:
+ *           type: integer
+ *           example: 2020
+ *         color:
+ *           type: string
+ *           example: Prata
+ */
+
 // ---------------------------------------------------------------------
 // Instâncias (singletons) — mesmo padrão do resto do projeto
 // ---------------------------------------------------------------------
@@ -100,6 +177,52 @@ routes.use(authMiddleware);
 // ✅ 2) controle de acesso por role (ADMIN/MANAGER)
 routes.use(accessControlMiddleware(["ADMIN", "MANAGER"]));
 
+/**
+ * @openapi
+ * /admin-car/plate/{licensePlate}:
+ *   get:
+ *     tags: [AdminCar]
+ *     summary: Buscar carro por placa (admin)
+ *     description: Retorna o carro vinculado à placa informada. A placa é normalizada (uppercase e sem caracteres especiais).
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: licensePlate
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Placa do veículo (ex. ABC1D23). Será normalizada no backend.
+ *         example: ABC1D23
+ *       - in: query
+ *         name: includeInactive
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [true, false]
+ *           default: true
+ *         description: "Se 'true', inclui carros inativos no resultado (quando aplicável)."
+ *         example: "true"
+ *     responses:
+ *       200:
+ *         description: Carro encontrado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AdminCar'
+ *       400:
+ *         description: Payload inválido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Não autenticado
+ *       403:
+ *         description: Sem permissão (somente ADMIN/MANAGER)
+ *       404:
+ *         description: Carro não encontrado
+ */
 // GET /admin-car/plate/:licensePlate?includeInactive=true|false
 routes.get(
     "/plate/:licensePlate",
@@ -109,6 +232,60 @@ routes.get(
     },
 );
 
+/**
+ * @openapi
+ * /admin-car/plate/{licensePlate}/user/{userId}:
+ *   get:
+ *     tags: [AdminCar]
+ *     summary: Buscar carro por placa e usuário (admin)
+ *     description: Retorna o carro da placa informada vinculado ao userId informado (útil quando existe histórico/mais de um vínculo).
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: licensePlate
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Placa do veículo (normalizada no backend)
+ *         example: ABC1D23
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *         description: ID do usuário dono do veículo
+ *         example: 45
+ *       - in: query
+ *         name: includeInactive
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [true, false]
+ *           default: true
+ *         description: "Se 'true', inclui carros inativos no resultado (quando aplicável)."
+ *         example: "true"
+ *     responses:
+ *       200:
+ *         description: Carro encontrado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AdminCar'
+ *       400:
+ *         description: Payload inválido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Não autenticado
+ *       403:
+ *         description: Sem permissão (somente ADMIN/MANAGER)
+ *       404:
+ *         description: Carro não encontrado
+ */
 // GET /admin-car/plate/:licensePlate/user/:userId?includeInactive=true|false
 routes.get(
     "/plate/:licensePlate/user/:userId",
@@ -118,6 +295,43 @@ routes.get(
     },
 );
 
+/**
+ * @openapi
+ * /admin-car/{carId}/activate:
+ *   patch:
+ *     tags: [AdminCar]
+ *     summary: Ativar carro por ID (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: carId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *         description: ID do carro
+ *         example: 123
+ *     responses:
+ *       200:
+ *         description: Carro ativado com sucesso
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AdminCar'
+ *       400:
+ *         description: Payload inválido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Não autenticado
+ *       403:
+ *         description: Sem permissão (somente ADMIN/MANAGER)
+ *       404:
+ *         description: Carro não encontrado
+ */
 // PATCH /admin-car/:carId/activate
 routes.patch(
     "/:carId/activate",
@@ -127,6 +341,43 @@ routes.patch(
     },
 );
 
+/**
+ * @openapi
+ * /admin-car/{carId}/deactivate:
+ *   patch:
+ *     tags: [AdminCar]
+ *     summary: Desativar carro por ID (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: carId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *         description: ID do carro
+ *         example: 123
+ *     responses:
+ *       200:
+ *         description: Carro desativado com sucesso
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AdminCar'
+ *       400:
+ *         description: Payload inválido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Não autenticado
+ *       403:
+ *         description: Sem permissão (somente ADMIN/MANAGER)
+ *       404:
+ *         description: Carro não encontrado
+ */
 // PATCH /admin-car/:carId/deactivate
 routes.patch(
     "/:carId/deactivate",
@@ -136,6 +387,51 @@ routes.patch(
     },
 );
 
+/**
+ * @openapi
+ * /admin-car/plate/{licensePlate}/user/{userId}/reactivate:
+ *   patch:
+ *     tags: [AdminCar]
+ *     summary: Reativar carro por placa e usuário (admin)
+ *     description: Reativa um vínculo de carro que esteja inativo para uma placa + usuário específicos.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: licensePlate
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Placa do veículo (normalizada no backend)
+ *         example: ABC1D23
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *         description: ID do usuário dono do veículo
+ *         example: 45
+ *     responses:
+ *       200:
+ *         description: Carro reativado com sucesso
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AdminCar'
+ *       400:
+ *         description: Payload inválido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Não autenticado
+ *       403:
+ *         description: Sem permissão (somente ADMIN/MANAGER)
+ *       404:
+ *         description: Carro não encontrado
+ */
 // PATCH /admin-car/plate/:licensePlate/user/:userId/reactivate
 routes.patch(
     "/plate/:licensePlate/user/:userId/reactivate",
@@ -145,6 +441,51 @@ routes.patch(
     },
 );
 
+/**
+ * @openapi
+ * /admin-car:
+ *   put:
+ *     tags: [AdminCar]
+ *     summary: Atualizar carro (admin)
+ *     description: Atualiza informações do carro via payload (validação feita por AdminUpdateCarDTO).
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/AdminUpdateCarDTO'
+ *           examples:
+ *             exemplo:
+ *               value:
+ *                 carId: 123
+ *                 userId: 45
+ *                 licensePlate: "ABC1D23"
+ *                 brand: "Toyota"
+ *                 model: "Corolla"
+ *                 year: 2020
+ *                 color: "Prata"
+ *     responses:
+ *       200:
+ *         description: Carro atualizado com sucesso
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AdminCar'
+ *       400:
+ *         description: Payload inválido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Não autenticado
+ *       403:
+ *         description: Sem permissão (somente ADMIN/MANAGER)
+ *       404:
+ *         description: Carro não encontrado
+ */
 // PUT /admin-car
 // mantém teu padrão: controller lê res.locals como AdminUpdateCarDTO
 routes.put(
