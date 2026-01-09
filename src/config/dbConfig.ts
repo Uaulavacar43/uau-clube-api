@@ -1,12 +1,13 @@
 import { PrismaClient } from "@prisma/client";
+import dotenv from "dotenv";
 
+// Garante que as variáveis de ambiente estão carregadas
+dotenv.config();
+
+// Prisma lê automaticamente DATABASE_URL de process.env
+// Não precisa passar explicitamente no datasources
 const prisma = new PrismaClient({
 	log: process.env.NODE_ENV === "development" ? ["query", "error", "warn"] : ["error"],
-	datasources: {
-		db: {
-			url: process.env.DATABASE_URL,
-		},
-	},
 });
 
 // Configuração de connection pooling e timeouts
