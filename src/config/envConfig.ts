@@ -44,6 +44,8 @@ if (!result.success) {
         "Invalid environment variables:",
         result.error.flatten().fieldErrors,
     );
+    console.error("Please check your .env file and ensure all required variables are set.");
+    // Não encerra o processo imediatamente - permite ver o erro completo
     process.exit(1);
 }
 
