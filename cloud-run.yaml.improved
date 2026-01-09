@@ -1,4 +1,5 @@
-# cloud-run.yaml
+# cloud-run.yaml - Versão Melhorada com Cloud SQL Connection
+# Esta versão usa Unix socket em vez de IP, o que é mais confiável após restarts
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
@@ -6,6 +7,12 @@ metadata:
   namespace: metal-music-479113-v9
 spec:
   template:
+    metadata:
+      annotations:
+        # IMPORTANTE: Substitua INSTANCE_NAME pelo nome real da sua instância Cloud SQL
+        # Formato: PROJECT_ID:REGION:INSTANCE_NAME
+        # Exemplo: metal-music-479113-v9:us-central1:lavacar
+        run.googleapis.com/cloudsql-instances: "metal-music-479113-v9:us-central1:INSTANCE_NAME"
     spec:
       containers:
         - image: us-central1-docker.pkg.dev/metal-music-479113-v9/uau/uau-clube-api:latest
@@ -13,15 +20,14 @@ spec:
             - name: NODE_ENV
               value: "production"
 
-
             # URL pública do app (Firebase Hosting + domínio customizado)
             - name: FRONTEND_URL
               value: "https://uaulavacar.com.br"
 
-            # DATABASE – GOOGLE CLOUD SQL (lavacar)
-            # Adicionado connection pooling para lidar melhor com restarts do Cloud SQL
+            # DATABASE – GOOGLE CLOUD SQL usando Unix socket (mais confiável)
+            # IMPORTANTE: Substitua INSTANCE_NAME pelo nome real da sua instância
             - name: DATABASE_URL
-              value: "postgresql://postgres:Lavacar2024!uau@34.39.229.12:5432/postgres?schema=public&connection_limit=10&pool_timeout=20&connect_timeout=10"
+              value: "postgresql://postgres:Lavacar2024!uau@/postgres?host=/cloudsql/metal-music-479113-v9:us-central1:INSTANCE_NAME&schema=public"
 
             # AUTH
             - name: JWT_SECRET
@@ -41,7 +47,7 @@ spec:
             - name: MAILER_ADMIN_EMAIL
               value: "uaulavacar46@gmail.com"
 
-            # ASAAS (Produção – igual ao .env)
+            # ASAAS (Produção)
             - name: ASAAS_API_URL
               value: "https://www.asaas.com/api/v3"
             - name: ASAAS_API_KEY
@@ -54,3 +60,4 @@ spec:
               value: "uau-lavacar-arquivos"
             - name: GOOGLE_CLOUD_PROJECT
               value: "metal-music-479113"
+
