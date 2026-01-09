@@ -22,6 +22,15 @@ import asaasRoutes from "./assas/asaas.routes";
 
 const routes = Router();
 
+// Health check route - para verificar se a API está funcionando
+routes.get("/health", (_req, res) => {
+	res.status(200).json({
+		status: "ok",
+		timestamp: new Date().toISOString(),
+		environment: process.env.NODE_ENV || "development",
+	});
+});
+
 // Arquivos estáticos de upload
 routes.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
