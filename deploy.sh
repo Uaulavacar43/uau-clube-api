@@ -12,6 +12,23 @@ IMAGE_NAME="us-central1-docker.pkg.dev/${PROJECT_ID}/uau/${SERVICE_NAME}"
 
 echo "🚀 Iniciando build e deploy da API..."
 
+# 0. Verificar e executar migrations do banco ANTES do deploy
+echo "🗄️  Verificando banco de dados..."
+if [ -f "scripts/check-db.sh" ]; then
+    # Se DATABASE_URL estiver definida, verifica o banco
+    if [ -n "$DATABASE_URL" ]; then
+        echo "   Verificando conexão com o banco..."
+        bash scripts/check-db.sh || {
+            echo "⚠️  Aviso: Não foi possível verificar o banco de dados"
+            echo "   Continuando com o deploy..."
+        }
+    else
+        echo "   DATABASE_URL não definida - migrations serão executadas no startup do container"
+    fi
+else
+    echo "   Script de verificação não encontrado - continuando..."
+fi
+
 # 1. Fazer push do código (se necessário)
 echo "📤 Fazendo push do código..."
 git push origin main || echo "⚠️  Push falhou ou já está atualizado"
