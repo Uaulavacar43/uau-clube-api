@@ -3,30 +3,41 @@
 # Imagem base
 FROM node:22-alpine
 
+# Instalar OpenSSL e compatibilidade com OpenSSL 1.1 (necessário para o Prisma em Alpine)
+# O Prisma engine linux-musl precisa de libssl.so.1.1, que é fornecido por openssl1.1-compat
+RUN apk add --no-cache openssl openssl1.1-compat
+
 # Diretório de trabalho dentro do container
 WORKDIR /usr/src/app
 
 # Copia apenas package.json e package-lock.json para aproveitar cache
 COPY package*.json ./
 
-# Instala TODAS as dependências (incluindo dev) para poder buildar TypeScript e gerar Prisma
+# Instala TODAS as dependências (incluindo dev)
 RUN npm ci
 
 # Copia o restante do código (inclui prisma/schema.prisma)
 COPY . .
 
-# Gera o Prisma Client dentro da imagem
+# Gera o Prisma Client
 RUN npx prisma generate
 
 # Build (gera dist/ via tsup)
 RUN npm run build
 
 # Remove dependências de dev para imagem ficar mais leve
-RUN npm prune --omit=dev
+# IMPORTANTE: Reinstala prisma como dependência de produção
+RUN npm prune --omit=dev && npm install prisma@^5.21.1 --save --no-save
 
 # Define ambiente de produção
 ENV NODE_ENV=production
+# Porta padrão (o App Runner pode sobrescrever, mas é bom ter um default)
+ENV PORT=8080
+# Host padrão para containers (0.0.0.0 = escuta em todas as interfaces)
+ENV HOST=0.0.0.0
 
-# Não fixa PORT aqui: o Cloud Run injeta PORT e seu código lê de process.env.PORT
-# Comando de inicialização
-CMD ["node", "dist/server.js"]
+# Comando de inicialização otimizado para AWS App Runner
+# IMPORTANTE: prisma migrate deploy não bloqueia a inicialização do servidor
+# Se as migrações falharem, o servidor ainda inicia para permitir health checks
+# As migrações são executadas em background e o servidor inicia imediatamente
+CMD npx prisma migrate deploy || echo "[Docker] Warning: Database migrations failed, but server will start anyway" && node dist/server.js

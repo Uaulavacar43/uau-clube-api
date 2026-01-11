@@ -19,9 +19,9 @@ spec:
               value: "https://uaulavacar.com.br"
 
             # DATABASE – GOOGLE CLOUD SQL (lavacar)
-            # Adicionado connection pooling para lidar melhor com restarts do Cloud SQL
+            # Prisma gerencia connection pooling internamente - não precisa de parâmetros na URL
             - name: DATABASE_URL
-              value: "postgresql://postgres:Lavacar2024!uau@34.39.229.12:5432/postgres?schema=public&connection_limit=10&pool_timeout=20&connect_timeout=10"
+              value: "postgresql://postgres:Lavacar2024!uau@34.39.229.12:5432/postgres?schema=public"
 
             # AUTH
             - name: JWT_SECRET

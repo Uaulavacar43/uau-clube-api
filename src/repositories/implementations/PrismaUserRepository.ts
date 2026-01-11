@@ -24,11 +24,48 @@ export class PrismaUserRepository implements IUserRepository {
 		email: string,
 		withIsDeleted = false,
 	): Promise<User | null> {
-		const userData = await prisma.user.findUnique({
-			where: { email, deletedAt: !withIsDeleted ? null : undefined },
-		});
-		if (!userData) return null;
-		return this.mapToEntity(userData);
+		// Retry logic para produção - tenta até 3 vezes com delay
+		const maxRetries = 3;
+		let lastError: Error | null = null;
+		
+		for (let attempt = 1; attempt <= maxRetries; attempt++) {
+			try {
+				const userData = await prisma.user.findUnique({
+					where: { email, deletedAt: !withIsDeleted ? null : undefined },
+				});
+				if (!userData) return null;
+				return this.mapToEntity(userData);
+			} catch (error) {
+				lastError = error instanceof Error ? error : new Error(String(error));
+				
+				// Se não for erro de conexão, não tenta novamente
+				const isConnectionError = 
+					lastError.message.includes("connect") ||
+					lastError.message.includes("timeout") ||
+					lastError.message.includes("ECONNREFUSED") ||
+					lastError.message.includes("ENOTFOUND") ||
+					lastError.message.includes("P1001"); // Prisma connection error code
+				
+				if (!isConnectionError || attempt === maxRetries) {
+					console.error("[PrismaUserRepository.findByEmail] Erro ao buscar usuário:", {
+						email,
+						attempt,
+						maxRetries,
+						error: lastError.message,
+						stack: lastError.stack,
+					});
+					throw lastError;
+				}
+				
+				// Aguarda antes de tentar novamente (exponential backoff)
+				const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+				console.warn(`[PrismaUserRepository.findByEmail] Tentativa ${attempt}/${maxRetries} falhou, tentando novamente em ${delay}ms...`);
+				await new Promise(resolve => setTimeout(resolve, delay));
+			}
+		}
+		
+		// Nunca deve chegar aqui, mas TypeScript precisa
+		throw lastError || new Error("Unknown error");
 	}
 
 	async findByCpf(

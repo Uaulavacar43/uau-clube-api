@@ -47,7 +47,20 @@ const asaasErrorMessages: Record<string, string> = {
 
 export function handleAsaasError(error: unknown): AppError {
 	if (isAxiosError(error)) {
-		console.log(error.response?.data);
+		// Log detalhado do erro para debug
+		console.error("[handleAsaasError] Erro do Axios:", {
+			url: error.config?.url,
+			method: error.config?.method,
+			status: error.response?.status,
+			statusText: error.response?.statusText,
+			data: error.response?.data,
+			code: error.code,
+			message: error.message,
+			hasResponse: !!error.response,
+			hasRequest: !!error.request,
+		});
+
+		// Verifica se há erros estruturados do ASAAS
 		const errors = error.response?.data?.errors as AsaasError[];
 
 		if (errors && errors.length > 0) {
@@ -74,17 +87,82 @@ export function handleAsaasError(error: unknown): AppError {
 			throw new AppError(errorMessage, statusCode);
 		}
 
+		// Tratamento específico para diferentes tipos de erro do Axios
+		if (error.code === "ECONNREFUSED" || error.code === "ENOTFOUND") {
+			console.error("[handleAsaasError] Erro de conexão com ASAAS:", {
+				code: error.code,
+				url: error.config?.url,
+				baseURL: error.config?.baseURL,
+			});
+			throw new AppError(
+				"Não foi possível conectar ao serviço ASAAS. Verifique se a URL da API está correta e se o serviço está disponível.",
+				503,
+			);
+		}
+
+		// Tratamento específico para erros de certificado SSL
+		if (
+			error.code === "SELF_SIGNED_CERT_IN_CHAIN" ||
+			error.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
+			error.message?.includes("self signed certificate") ||
+			error.message?.includes("certificate")
+		) {
+			console.error("[handleAsaasError] Erro de certificado SSL:", {
+				code: error.code,
+				message: error.message,
+				url: error.config?.url,
+			});
+			throw new AppError(
+				"Erro de certificado SSL ao conectar com o ASAAS. Se você está em um ambiente corporativo com proxy, configure a variável ASAAS_REJECT_UNAUTHORIZED=false no .env",
+				500,
+			);
+		}
+
+		if (error.code === "ETIMEDOUT" || error.code === "ECONNABORTED") {
+			console.error("[handleAsaasError] Timeout na requisição ao ASAAS");
+			throw new AppError(
+				"Tempo de conexão com o ASAAS esgotado. Tente novamente mais tarde.",
+				504,
+			);
+		}
+
+		if (error.response?.status === 401 || error.response?.status === 403) {
+			console.error("[handleAsaasError] Erro de autenticação com ASAAS:", {
+				status: error.response.status,
+				data: error.response.data,
+			});
+			throw new AppError(
+				"Erro de autenticação com o ASAAS. Verifique se a chave de API está correta.",
+				401,
+			);
+		}
+
 		// Fallback para erros do Axios sem a estrutura padrão do ASAAS
+		const errorMessage = error.response?.data?.message || 
+			error.response?.data?.error ||
+			(error.code ? `Erro de conexão: ${error.code}` : "Erro ao comunicar com o ASAAS");
+		
+		console.error("[handleAsaasError] Erro genérico do ASAAS:", {
+			message: errorMessage,
+			status: error.response?.status || 500,
+			responseData: error.response?.data,
+		});
+
 		throw new AppError(
-			error.response?.data?.message || "Erro ao comunicar com o ASAAS",
+			errorMessage,
 			error.response?.status || 500,
 		);
 	}
 
 	// Fallback para erros não relacionados ao Axios
 	if (error instanceof Error) {
+		console.error("[handleAsaasError] Erro não-Axios:", {
+			message: error.message,
+			stack: error.stack,
+		});
 		throw new AppError(error.message, 500);
 	}
 
+	console.error("[handleAsaasError] Erro desconhecido:", error);
 	throw new AppError("Erro inesperado ao processar requisição ASAAS", 500);
 }

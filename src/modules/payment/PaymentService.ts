@@ -259,18 +259,84 @@ export class PaymentService {
 		}
 
 		// 5) Se existir o cliente no ASAAS atualiza ele, se não existir, cria
-		console.log("[createPayment] Criando cliente no ASAAS...");
-		const asaasCustomer = await asaasGetOrCreateCustomerByCpfCnpj({
+		const cpfCnpj = data.creditCardHolderInfo?.cpfCnpj ?? cpf;
+		const customerEmail = data.creditCardHolderInfo?.email ?? loggedUser.email;
+		const customerPhone = data.creditCardHolderInfo?.phone ?? loggedUser.phone;
+		
+		console.log("[subscribeToPlan] Dados do cliente para ASAAS:", {
 			name: loggedUser.name,
-			cpfCnpj: data.creditCardHolderInfo?.cpfCnpj ?? cpf,
-			email: data.creditCardHolderInfo?.email ?? loggedUser.email,
-			phone: data.creditCardHolderInfo?.phone ?? loggedUser.phone,
-			postalCode: data.creditCardHolderInfo?.postalCode,
-			addressNumber: data.creditCardHolderInfo?.addressNumber,
-			mobilePhone:
-				data.creditCardHolderInfo?.mobilePhone ??
-				data.creditCardHolderInfo?.phone,
-			notificationDisabled: false,
+			cpfCnpj: cpfCnpj ? `${cpfCnpj.substring(0, 3)}***` : "NÃO FORNECIDO",
+			email: customerEmail,
+			phone: customerPhone,
+			hasCreditCardHolderInfo: !!data.creditCardHolderInfo,
+		});
+
+		if (!cpfCnpj || cpfCnpj.trim() === "") {
+			console.error("[subscribeToPlan] CPF/CNPJ não fornecido ou vazio");
+			throw new AppError(
+				"CPF/CNPJ é obrigatório para criar o cliente no ASAAS",
+				400,
+			);
+		}
+
+		if (!customerEmail || customerEmail.trim() === "") {
+			console.error("[subscribeToPlan] Email não fornecido ou vazio");
+			throw new AppError(
+				"Email é obrigatório para criar o cliente no ASAAS",
+				400,
+			);
+		}
+
+		console.log("[subscribeToPlan] Criando/buscando cliente no ASAAS...");
+		let asaasCustomer;
+		try {
+			asaasCustomer = await asaasGetOrCreateCustomerByCpfCnpj({
+				name: loggedUser.name,
+				cpfCnpj: cpfCnpj,
+				email: customerEmail,
+				phone: customerPhone,
+				postalCode: data.creditCardHolderInfo?.postalCode,
+				addressNumber: data.creditCardHolderInfo?.addressNumber,
+				mobilePhone:
+					data.creditCardHolderInfo?.mobilePhone ??
+					data.creditCardHolderInfo?.phone,
+				notificationDisabled: false,
+			});
+		} catch (error) {
+			console.error("[subscribeToPlan] Erro ao criar/buscar cliente no ASAAS:", {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			// Se for um AppError, relançar (já tem mensagem apropriada)
+			if (error instanceof AppError) {
+				throw error;
+			}
+			// Caso contrário, lançar erro genérico
+			throw new AppError(
+				"Erro ao gerar pagamento PIX: Usuário sem customerId do ASAAS. Cadastre o cliente no ASAAS antes de assinar.",
+				400,
+			);
+		}
+
+		// Validar se o customerId foi retornado corretamente
+		if (!asaasCustomer?.id) {
+			console.error(
+				"[subscribeToPlan] Erro: asaasCustomer não possui id válido",
+				{
+					asaasCustomer: asaasCustomer ? JSON.stringify(asaasCustomer) : "null/undefined",
+					hasId: !!asaasCustomer?.id,
+					customerKeys: asaasCustomer ? Object.keys(asaasCustomer) : [],
+				},
+			);
+			throw new AppError(
+				"Erro ao gerar pagamento PIX: Usuário sem customerId do ASAAS. Cadastre o cliente no ASAAS antes de assinar.",
+				400,
+			);
+		}
+
+		console.log("[subscribeToPlan] Cliente ASAAS criado/buscado com sucesso:", {
+			customerId: asaasCustomer.id,
+			customerName: asaasCustomer.name,
 		});
 
 		// 6) Criar assinatura no ASAAS com cobrança imediata
@@ -356,16 +422,17 @@ export class PaymentService {
 			this.validatePlanInstallments(plan, data.installments);
 
 			let expiresAt: Date | null = null;
-			if (plan.periodicityType === PeriodicityType.QUARTERLY) {
-				expiresAt = dateWithTimeZone;
+			if (plan.periodicityType === PeriodicityType.MONTH) {
+				expiresAt = new Date(dateWithTimeZone);
+				expiresAt.setMonth(expiresAt.getMonth() + 1);
+			} else if (plan.periodicityType === PeriodicityType.QUARTERLY) {
+				expiresAt = new Date(dateWithTimeZone);
 				expiresAt.setMonth(expiresAt.getMonth() + 3);
-			}
-			if (plan.periodicityType === PeriodicityType.SEMIANNUALLY) {
-				expiresAt = dateWithTimeZone;
+			} else if (plan.periodicityType === PeriodicityType.SEMIANNUALLY) {
+				expiresAt = new Date(dateWithTimeZone);
 				expiresAt.setMonth(expiresAt.getMonth() + 6);
-			}
-			if (plan.periodicityType === PeriodicityType.YEAR) {
-				expiresAt = dateWithTimeZone;
+			} else if (plan.periodicityType === PeriodicityType.YEAR) {
+				expiresAt = new Date(dateWithTimeZone);
 				expiresAt.setFullYear(expiresAt.getFullYear() + 1);
 			}
 			if (plan.extraMonths && expiresAt) {
@@ -467,7 +534,7 @@ export class PaymentService {
 				asaasPayment,
 			};
 		} else {
-			const { subscription, payment } = await this.createAsaasSubscription(
+			const result = await this.createAsaasSubscription(
 				{
 					...data,
 					userId,
@@ -478,17 +545,17 @@ export class PaymentService {
 				billingSubscriptionType,
 			);
 
-			if (!subscription) {
+			if (!result || !result.subscription) {
 				throw new AppError("Falha ao criar assinatura", 400);
 			}
 			console.log(
 				"[createPayment] Assinatura criada no ASAAS:",
-				subscription.id,
+				result.subscription.id,
 			);
 
 			return {
-				subscription,
-				payment,
+				subscription: result.subscription,
+				payment: result.payment,
 			};
 		}
 	}
@@ -541,13 +608,7 @@ export class PaymentService {
 	}
 
 	private validatePlanInstallments(plan: Plan, installments?: number) {
-		if (plan.isPackage && plan.periodicityType === PeriodicityType.MONTH) {
-			throw new AppError(
-				"O plano no formato pacote não pode ter um prazo mensal",
-				400,
-			);
-		}
-
+		// Validação de parcelas para planos anuais
 		if (
 			plan.periodicityType === PeriodicityType.YEAR &&
 			installments &&
@@ -556,6 +617,7 @@ export class PaymentService {
 			throw new AppError("O plano anual não pode ter mais de 12 parcelas", 400);
 		}
 
+		// Validação de parcelas para planos semestrais
 		if (
 			plan.periodicityType === PeriodicityType.SEMIANNUALLY &&
 			installments &&
@@ -563,6 +625,30 @@ export class PaymentService {
 		) {
 			throw new AppError(
 				"O plano semestral não pode ter mais de 6 parcelas",
+				400,
+			);
+		}
+
+		// Validação de parcelas para planos trimestrais
+		if (
+			plan.periodicityType === PeriodicityType.QUARTERLY &&
+			installments &&
+			installments > 3
+		) {
+			throw new AppError(
+				"O plano trimestral não pode ter mais de 3 parcelas",
+				400,
+			);
+		}
+
+		// Validação de parcelas para planos mensais
+		if (
+			plan.periodicityType === PeriodicityType.MONTH &&
+			installments &&
+			installments > 1
+		) {
+			throw new AppError(
+				"O plano mensal não pode ter mais de 1 parcela",
 				400,
 			);
 		}
@@ -744,13 +830,13 @@ export class PaymentService {
 				);
 				const payment = paymentList.data[0];
 				if (!payment) {
-					console.log(
+					console.error(
 						"[createPayment] Nenhum pagamento encontrado para a assinatura.",
 					);
-					return {
-						status: 400,
-						message: "Nenhum pagamento encontrado para a assinatura.",
-					};
+					throw new AppError(
+						"Nenhum pagamento encontrado para a assinatura. Tente novamente.",
+						400,
+					);
 				}
 				console.log("[createPayment] Recuperando QR code PIX...");
 				const asaasPixCode = await asaasGetPixQrCode(payment.id);
@@ -788,7 +874,17 @@ export class PaymentService {
 				"[createAsaasSubscription] Erro ao criar assinatura:",
 				error,
 			);
-			return { status: 400, message: "Erro ao criar assinatura", error };
+			// Se for um AppError, relançar para que seja tratado pelo middleware de erro
+			if (error instanceof AppError) {
+				throw error;
+			}
+			// Se for um erro do ASAAS (já tratado pelo handleAsaasError), relançar
+			throw new AppError(
+				error instanceof Error
+					? error.message
+					: "Erro ao criar assinatura no ASAAS",
+				400,
+			);
 		}
 	}
 

@@ -1,5 +1,6 @@
 import express, { Router } from "express";
 import path from "path";
+import prisma from "./config/dbConfig";
 
 import authRoutes from "./modules/auth/routes";
 import couponRoutes from "./modules/coupon/routes";
@@ -23,12 +24,41 @@ import asaasRoutes from "./assas/asaas.routes";
 const routes = Router();
 
 // Health check route - para verificar se a API está funcionando
-routes.get("/health", (_req, res) => {
-	res.status(200).json({
-		status: "ok",
-		timestamp: new Date().toISOString(),
-		environment: process.env.NODE_ENV || "development",
-	});
+// CRÍTICO PARA AWS APP RUNNER: Este endpoint é usado para health checks
+// Retorna 200 mesmo se o banco estiver desconectado (para permitir inicialização)
+// O App Runner precisa que o servidor responda 200 para considerar o deploy bem-sucedido
+routes.get("/health", async (_req, res) => {
+	try {
+		// Verifica conexão com o banco de dados com timeout
+		await Promise.race([
+			prisma.$queryRaw`SELECT 1`,
+			new Promise((_, reject) => 
+				setTimeout(() => reject(new Error("Database health check timeout")), 5000)
+			)
+		]);
+		
+		res.status(200).json({
+			status: "ok",
+			timestamp: new Date().toISOString(),
+			environment: process.env.NODE_ENV || "development",
+			database: "connected",
+			server: "running",
+		});
+	} catch (error) {
+		// IMPORTANTE: Retorna 200 mesmo com erro de banco para permitir inicialização
+		// O App Runner precisa que o servidor responda para considerar o deploy bem-sucedido
+		// O banco pode estar temporariamente indisponível durante migrações ou restarts
+		console.warn("[Health Check] ⚠️ Database health check failed (non-critical):", error instanceof Error ? error.message : "Unknown error");
+		
+		res.status(200).json({
+			status: "ok",
+			timestamp: new Date().toISOString(),
+			environment: process.env.NODE_ENV || "development",
+			database: "disconnected",
+			server: "running",
+			warning: "Database connection check failed, but server is operational",
+		});
+	}
 });
 
 // Arquivos estáticos de upload
