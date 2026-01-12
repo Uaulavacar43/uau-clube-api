@@ -3,9 +3,9 @@
 # Imagem base
 FROM node:22-alpine
 
-# Instalar OpenSSL e compatibilidade com OpenSSL 1.1 (necessário para o Prisma em Alpine)
-# O Prisma engine linux-musl precisa de libssl.so.1.1, que é fornecido por openssl1.1-compat
-RUN apk add --no-cache openssl openssl1.1-compat
+# Instalar OpenSSL (necessário para o Prisma em Alpine)
+# REMOVIDO: openssl1.1-compat (não existe no Alpine do node:22)
+RUN apk add --no-cache openssl
 
 # Diretório de trabalho dentro do container
 WORKDIR /usr/src/app
@@ -37,7 +37,4 @@ ENV PORT=8080
 ENV HOST=0.0.0.0
 
 # Comando de inicialização otimizado para AWS App Runner
-# IMPORTANTE: prisma migrate deploy não bloqueia a inicialização do servidor
-# Se as migrações falharem, o servidor ainda inicia para permitir health checks
-# As migrações são executadas em background e o servidor inicia imediatamente
 CMD npx prisma migrate deploy || echo "[Docker] Warning: Database migrations failed, but server will start anyway" && node dist/server.js
