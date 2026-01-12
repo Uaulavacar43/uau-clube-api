@@ -4,9 +4,12 @@
   "description": "**Edit a file, create a new file, and clone from Bitbucket in under 2 minutes**",
   "main": "dist/server.js",
   "scripts": {
-    "start": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "start": "node dist/server.js",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-    "build": "tsup",
+    "build": "prisma generate && tsup",
+    "build:local": "NODE_TLS_REJECT_UNAUTHORIZED=0 prisma generate && tsup",
+    "prisma:generate": "prisma generate",
+    "prisma:generate:local": "NODE_TLS_REJECT_UNAUTHORIZED=0 prisma generate",
     "start:prod": "npm run build && node dist/server.js",
     "sync:asaas": "ts-node-dev --transpile-only src/assas/sync-asaas.ts"
   },

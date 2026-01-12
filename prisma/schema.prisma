@@ -2,9 +2,9 @@ generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["multiSchema"]
   // Especifica explicitamente os targets para garantir compatibilidade
-  // linux-musl é necessário para Alpine Linux (usado no Dockerfile)
-  // Com openssl1.1-compat instalado no Dockerfile, o engine linux-musl funcionará corretamente
-  binaryTargets    = ["native", "linux-musl"]
+  // debian-openssl-3.0.x é necessário para Debian/Ubuntu (usado no Render)
+  // native é para desenvolvimento local (macOS/Windows)
+  binaryTargets    = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {

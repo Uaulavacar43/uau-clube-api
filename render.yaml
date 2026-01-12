@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: uau-clube-api
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      # DATABASE_URL será configurada manualmente no dashboard do Render
+      # usando a "Internal Database URL" do PostgreSQL do Render
+      - key: DATABASE_URL
+        sync: false  # Deve ser configurada manualmente
+      # As outras variáveis de ambiente devem ser configuradas manualmente:
+      # - MAILER_HOST
+      # - MAILER_PORT
+      # - MAILER_USER
+      # - MAILER_PASS
+      # - JWT_SECRET
+      # - ASAAS_API_URL
+      # - ASAAS_API_KEY
+      # - GCS_BUCKET_NAME
+      # - GOOGLE_CLOUD_PROJECT
+      # - FRONTEND_URL
+
