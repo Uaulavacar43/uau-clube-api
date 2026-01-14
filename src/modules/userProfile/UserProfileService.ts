@@ -66,7 +66,7 @@ export class UserProfileService {
 		await this.userRepository.update(user.id, { otp });
 
 		const { html, text, subject } = forgotPasswordEmail(otp);
-		this.mailingQueue.addToQueue({ to: email, subject, text, html });
+		await this.mailingQueue.addToQueue({ to: email, subject, text, html });
 	}
 
 	public async resetPassword(
