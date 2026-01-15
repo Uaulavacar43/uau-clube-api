@@ -373,7 +373,7 @@ export class PaymentService {
 				new Subscription({
 					userId: loggedUser.id,
 					planId: plan.id,
-					planType: plan.periodicityType, // Supondo que seja mensal, modificar conforme necessário
+					planType: String(plan.periodicityType),
 					amount: plan.price,
 					isActive: true,
 					startDate: dateWithTimeZone,
@@ -443,7 +443,7 @@ export class PaymentService {
 				new Subscription({
 					userId: loggedUser.id,
 					planId: plan.id,
-					planType: plan.periodicityType, // Supondo que seja mensal, modificar conforme necessário
+					planType: String(plan.periodicityType),
 					amount: plan.price,
 					isActive: false,
 					startDate: dateWithTimeZone,
@@ -741,7 +741,7 @@ export class PaymentService {
 				new Subscription({
 					userId: data.userId,
 					planId: plan.id,
-					planType: cycle,
+					planType: String(plan.periodicityType), // Usa o enum PeriodicityType (MONTH, WEEK, YEAR, etc.) ao invés do enum do ASAAS
 					amount: plan.price,
 					isActive: false,
 					startDate: new Date(),
@@ -954,10 +954,25 @@ export class PaymentService {
 				`[handleSubscriptionWebhook] Registrando nova assinatura no banco de dados para userId: ${userId}, planId: ${planId}`,
 			);
 
+			const asaasToDbCycleMap = new Map<string, string>([
+				[ASAASSubscriptionCycleEnum.WEEKLY, PeriodicityType.WEEK],
+				[ASAASSubscriptionCycleEnum.MONTHLY, PeriodicityType.MONTH],
+				[ASAASSubscriptionCycleEnum.QUARTERLY, PeriodicityType.QUARTERLY],
+				[ASAASSubscriptionCycleEnum.SEMIANNUALLY, PeriodicityType.SEMIANNUALLY],
+				[ASAASSubscriptionCycleEnum.YEARLY, PeriodicityType.YEAR],
+			]);
+
+			const planType = asaasToDbCycleMap.get(body.subscription.cycle) || body.subscription.cycle;
+			if (!asaasToDbCycleMap.has(body.subscription.cycle)) {
+				console.warn(
+					`[handleSubscriptionWebhook] Ciclo do ASAAS não mapeado: ${body.subscription.cycle}, usando valor original`,
+				);
+			}
+
 			const newSubscription = new Subscription({
 				userId,
 				planId,
-				planType: body.subscription.cycle,
+				planType,
 				amount: body.subscription.value,
 				isActive: true,
 				startDate: new Date(),
@@ -999,7 +1014,6 @@ export class PaymentService {
 			// Valor do pagamento
 			const amount = Number(body.payment.value) || 0;
 
-			// Tentar analisar userId|planId a partir de externalReference
 			let { userId, planId, couponId, subId } = JSON.parse(
 				body.payment.externalReference || "",
 			) as {
@@ -1013,7 +1027,6 @@ export class PaymentService {
 				`[handlePaymentWebhook] userId inicial: ${userId}, planId inicial: ${planId}, couponId inicial: ${couponId}`,
 			);
 
-			// Se não encontrado, procurar assinatura local
 			if (!userId && body.payment?.subscription) {
 				console.log(
 					"[handlePaymentWebhook] Procurando usuário a partir da assinatura local...",
@@ -1027,7 +1040,6 @@ export class PaymentService {
 				}
 			}
 
-			// Verificar usuário
 			if (userId) {
 				const userExists = await this.userRepository.findById(userId);
 				if (!userExists) {
@@ -1049,7 +1061,6 @@ export class PaymentService {
 				};
 			}
 
-			// Verificar plano
 			if (planId === 0 && body.payment?.subscription) {
 				console.log(
 					"[handlePaymentWebhook] Procurando plano a partir da assinatura local...",
@@ -1102,7 +1113,6 @@ export class PaymentService {
 				`[handlePaymentWebhook] ${existingPayment ? "Atualizando" : "Registrando"} pagamento => userId: ${userId}, planId: ${planId}, couponId: ${couponId}, amount: ${amount}, status: ${newStatus}`,
 			);
 
-			// Inserir Pagamento local
 			const newPayment = new Payment({
 				userId,
 				planId,
@@ -1187,10 +1197,6 @@ export class PaymentService {
 			return { status: 200, message: "Erro interno", error };
 		}
 	}
-
-	// --------------------------------------
-	// Métodos adicionais para relatórios/estatísticas
-	// --------------------------------------
 
 	public async getMonthlyRevenueHistory() {
 		return this.paymentRepository.getMonthlyRevenueHistory();
