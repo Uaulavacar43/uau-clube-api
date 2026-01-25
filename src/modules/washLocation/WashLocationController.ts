@@ -20,10 +20,8 @@ export class WashLocationController {
 		try {
 			const data: RegisterWashLocationDTO = req.body;
 
-			// Validação adicional para garantir que todos os campos estão presentes
 			if (
 				!data.name ||
-				!data.images ||
 				!data.street ||
 				!data.number ||
 				!data.neighborhood ||
@@ -112,7 +110,6 @@ export class WashLocationController {
 			const { locationId } = req.params;
 			const openingHours = req.body.openingHours;
 
-			// Verificar se openingHours é um array
 			if (!Array.isArray(openingHours)) {
 				throw new AppError(
 					"Dados inválidos: openingHours deve ser um array",
@@ -120,7 +117,6 @@ export class WashLocationController {
 				);
 			}
 
-			// Verificar se cada item do array tem o formato correto
 			for (const hour of openingHours) {
 				if (!hour.dayOfWeek || !hour.openTime || !hour.closeTime) {
 					throw new AppError(
@@ -211,10 +207,8 @@ export class WashLocationController {
 		try {
 			const data: RegisterCompleteWashLocationDTO = req.body;
 
-			// Validação básica
 			if (
 				!data.name ||
-				!data.images ||
 				!data.street ||
 				!data.number ||
 				!data.neighborhood ||
@@ -244,7 +238,6 @@ export class WashLocationController {
 			const { locationId } = req.params;
 			const data = res.locals as UpdateCompleteWashLocationDTO;
 
-			// Validação básica - verificar se pelo menos um campo foi fornecido
 			if (Object.keys(data).length === 0) {
 				throw new AppError("Nenhum campo fornecido para atualização", 400);
 			}

@@ -2,9 +2,7 @@ import { z } from "zod";
 
 export const RegisterWashLocationDTO = z.object({
 	name: z.string({ required_error: "Name is required" }),
-	images: z
-		.array(z.string())
-		.nonempty({ message: "At least one image URL is required" }), // Renombrado a `images`
+	images: z.array(z.string()).optional().default([]),
 	street: z.string({ required_error: "Street is required" }),
 	number: z.string({ required_error: "Number is required" }),
 	neighborhood: z.string({ required_error: "Neighborhood is required" }),

@@ -28,7 +28,10 @@ export class WashLocationService {
 			);
 		}
 
-		return await this.washLocationRepository.create(data);
+		return await this.washLocationRepository.create({
+			...data,
+			images: data.images || [],
+		});
 	}
 
 	public async listWashLocations(
@@ -73,7 +76,6 @@ export class WashLocationService {
 		locationId: number,
 		openingHours: UpdateOpeningHoursDTO,
 	): Promise<WashLocation> {
-		// Transformar os horários de funcionamento para a estrutura esperada
 		const transformedHours = openingHours.map((hour) => ({
 			day: hour.dayOfWeek,
 			open: hour.openTime,
@@ -138,7 +140,6 @@ export class WashLocationService {
 	public async registerCompleteWashLocation(
 		data: RegisterCompleteWashLocationDTO,
 	): Promise<WashLocation> {
-		// Validação de nome e cidade duplicados
 		const existingLocation =
 			await this.washLocationRepository.findByNameAndCity(data.name, data.city);
 		if (existingLocation) {
@@ -148,10 +149,9 @@ export class WashLocationService {
 			);
 		}
 
-		// Criar localização com dados básicos
 		const basicData = {
 			name: data.name,
-			images: data.images,
+			images: data.images || [],
 			street: data.street,
 			number: data.number,
 			neighborhood: data.neighborhood,
@@ -163,9 +163,7 @@ export class WashLocationService {
 
 		const washLocation = await this.washLocationRepository.create(basicData);
 
-		// Processar horários de funcionamento, se fornecidos
 		if (data.openingHours && data.openingHours.length > 0) {
-			// Transformar para o formato esperado pelo repositório
 			const transformedHours = data.openingHours.map((hour, index) => ({
 				day: hour.dayOfWeek,
 				index,
@@ -179,7 +177,6 @@ export class WashLocationService {
 			);
 		}
 
-		// Processar disponibilidade de serviços, se fornecida
 		if (data.services && data.services.length > 0) {
 			for (const service of data.services) {
 				await this.washLocationRepository.updateServiceAvailability(
@@ -190,7 +187,6 @@ export class WashLocationService {
 			}
 		}
 
-		// Buscar localização completa atualizada
 		const updatedLocation =
 			await this.washLocationRepository.findByIdWithServices(washLocation.id);
 		if (!updatedLocation) {

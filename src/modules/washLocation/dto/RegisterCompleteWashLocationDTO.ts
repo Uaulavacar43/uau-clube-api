@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-// Reaproveitando schema de horários existente
 const OpeningHourSchema = z.object({
 	dayOfWeek: z.enum(
 		[
@@ -25,7 +24,6 @@ const OpeningHourSchema = z.object({
 	}),
 });
 
-// Schema para serviços disponíveis
 const ServiceAvailabilitySchema = z.object({
 	serviceId: z.number({
 		required_error: "Service ID is required",
@@ -35,13 +33,9 @@ const ServiceAvailabilitySchema = z.object({
 	}),
 });
 
-// Schema completo para cadastro
 export const RegisterCompleteWashLocationDTO = z.object({
-	// Dados básicos da localização
 	name: z.string({ required_error: "Name is required" }),
-	images: z
-		.array(z.string())
-		.nonempty({ message: "At least one image URL is required" }),
+	images: z.array(z.string()).optional().default([]),
 	street: z.string({ required_error: "Street is required" }),
 	number: z.string({ required_error: "Number is required" }),
 	neighborhood: z.string({ required_error: "Neighborhood is required" }),
@@ -49,8 +43,6 @@ export const RegisterCompleteWashLocationDTO = z.object({
 	phoneNumber: z.string().optional(),
 	managerId: z.number({ required_error: "Manager ID is required" }),
 	flow: z.enum(["LOW", "MODERATE", "HIGH"]).default("LOW"),
-
-	// Dados adicionais
 	openingHours: z.array(OpeningHourSchema).optional(),
 	services: z.array(ServiceAvailabilitySchema).optional(),
 });
