@@ -1,5 +1,6 @@
 import { createTransport } from "nodemailer";
 import { envConfig } from "../config/envConfig";
+import { AppError } from "../error/AppError";
 
 export interface MailPayload {
 	to: string | string[];
@@ -48,7 +49,7 @@ export class Mailer {
 			} else {
 				console.error("Unexpected error:", error);
 			}
-			throw new Error("Failed to send email");
+			throw new AppError("Falha ao enviar email. Verifique a configuração do servidor de email.", 500);
 		}
 	}
 
