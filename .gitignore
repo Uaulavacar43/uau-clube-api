@@ -51,3 +51,4 @@ Thumbs.db
 .env
 src/config/uau-clube-firebase-adminsdk-o1qmw-18afdee6ef.json
 firebase.json
+*.sql
