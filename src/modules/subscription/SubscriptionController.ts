@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { AppError } from "../../error/AppError";
+import type { ActivateSubscriptionDTO } from "./dto/ActivateSubscriptionDTO";
 import type { UpdateSubscriptionDTO } from "./dto/UpdateSubscriptionDTO";
 import type { SubscriptionService } from "./SubscriptionService";
 
@@ -71,6 +72,40 @@ export class SubscriptionController {
 			const updatedSubscription =
 				await this.subscriptionService.updateSubscription(data.id, data);
 			res.status(200).customJson(updatedSubscription);
+		} catch (error) {
+			next(error);
+		}
+	}
+
+	public async activateSubscription(
+		req: Request,
+		res: Response,
+		next: NextFunction,
+	): Promise<void> {
+		try {
+			if (req.user?.role !== "ADMIN") {
+				throw new AppError("Não autorizado. Apenas administradores podem ativar assinaturas.", 401);
+			}
+
+			const subscriptionId = Number(req.params.id);
+
+			if (isNaN(subscriptionId)) {
+				throw new AppError("ID de assinatura inválido", 400);
+			}
+
+			const data: ActivateSubscriptionDTO = {
+				id: subscriptionId,
+				planId: req.body.planId,
+				startDate: req.body.startDate,
+				endDate: req.body.endDate,
+			};
+
+			const activatedSubscription =
+				await this.subscriptionService.activateSubscription(subscriptionId, data);
+			res.status(200).customJson({
+				message: "Assinatura ativada com sucesso",
+				subscription: activatedSubscription,
+			});
 		} catch (error) {
 			next(error);
 		}

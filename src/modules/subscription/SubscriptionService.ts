@@ -8,6 +8,7 @@ import type { ISubscriptionRepository } from "../../repositories/interfaces/ISub
 import type { IUserCarRepository } from "../../repositories/interfaces/IUserCarRepository";
 import type { IUserRepository } from "../../repositories/interfaces/IUserRepository";
 import { asaasCancelSubscription } from "../../utils/asaas/asaasSubscriptions";
+import type { ActivateSubscriptionDTO } from "./dto/ActivateSubscriptionDTO";
 import type { UpdateSubscriptionDTO } from "./dto/UpdateSubscriptionDTO";
 
 export class SubscriptionService {
@@ -129,5 +130,68 @@ export class SubscriptionService {
 	// Função para listar assinaturas de um usuário
 	public async listSubscriptions(userId: number): Promise<Subscription[]> {
 		return await this.subscriptionRepository.findByUserId(userId, true);
+	}
+
+	public async activateSubscription(
+		subscriptionId: number,
+		data: ActivateSubscriptionDTO,
+	): Promise<Subscription> {
+		const subscription =
+			await this.subscriptionRepository.findById(subscriptionId);
+		if (!subscription) {
+			throw new AppError("Assinatura não encontrada", 404);
+		}
+
+		let planId = data.planId || subscription.planId;
+		let amount = subscription.amount || 0;
+
+		if (planId) {
+			const plan = await this.planRepository.findById(planId);
+			if (plan) {
+				amount = plan.price || 0;
+			}
+		}
+
+		const now = new Date();
+		const startDate = data.startDate ? new Date(data.startDate) : now;
+		
+		let endDate: Date;
+		if (data.endDate) {
+			endDate = new Date(data.endDate);
+		} else {
+			endDate = new Date(startDate);
+			const planType = subscription.planType?.toUpperCase() || "MONTH";
+			
+			switch (planType) {
+				case "QUARTER":
+				case "QUARTERLY":
+				case "TRIMESTER":
+				case "TRIMESTRAL":
+					endDate.setMonth(endDate.getMonth() + 3);
+					break;
+				case "SEMESTER":
+				case "SEMESTRAL":
+				case "SEMIANNUAL":
+					endDate.setMonth(endDate.getMonth() + 6);
+					break;
+				case "YEAR":
+				case "YEARLY":
+				case "ANNUAL":
+					endDate.setFullYear(endDate.getFullYear() + 1);
+					break;
+				default:
+					endDate.setMonth(endDate.getMonth() + 1);
+					break;
+			}
+		}
+
+		return await this.subscriptionRepository.update(subscriptionId, {
+			isActive: true,
+			startDate,
+			endDate,
+			expiresAt: endDate,
+			planId,
+			amount,
+		});
 	}
 }

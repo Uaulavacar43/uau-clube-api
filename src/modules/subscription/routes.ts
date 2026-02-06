@@ -49,4 +49,8 @@ router.delete("/:id", authMiddleware, (req, res, next) =>
 	subscriptionController.cancelSubscription(req, res, next),
 );
 
+router.post("/:id/activate", authMiddleware, (req, res, next) =>
+	subscriptionController.activateSubscription(req, res, next),
+);
+
 export default router;
