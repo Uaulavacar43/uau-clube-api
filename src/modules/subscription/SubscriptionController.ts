@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { AppError } from "../../error/AppError";
 import type { ActivateSubscriptionDTO } from "./dto/ActivateSubscriptionDTO";
+import type { CreateSubscriptionDTO } from "./dto/CreateSubscriptionDTO";
 import type { UpdateSubscriptionDTO } from "./dto/UpdateSubscriptionDTO";
 import type { SubscriptionService } from "./SubscriptionService";
 
@@ -105,6 +106,39 @@ export class SubscriptionController {
 			res.status(200).customJson({
 				message: "Assinatura ativada com sucesso",
 				subscription: activatedSubscription,
+			});
+		} catch (error) {
+			next(error);
+		}
+	}
+
+	public async createSubscription(
+		req: Request,
+		res: Response,
+		next: NextFunction,
+	): Promise<void> {
+		try {
+			if (req.user?.role !== "ADMIN") {
+				throw new AppError("Não autorizado. Apenas administradores podem criar assinaturas.", 401);
+			}
+
+			const data: CreateSubscriptionDTO = {
+				userId: req.body.userId,
+				planId: req.body.planId,
+				carId: req.body.carId,
+				startDate: req.body.startDate,
+				endDate: req.body.endDate,
+			};
+
+			if (!data.userId || !data.planId) {
+				throw new AppError("userId e planId são obrigatórios", 400);
+			}
+
+			const newSubscription =
+				await this.subscriptionService.createSubscription(data);
+			res.status(201).customJson({
+				message: "Assinatura criada com sucesso",
+				subscription: newSubscription,
 			});
 		} catch (error) {
 			next(error);

@@ -9,6 +9,7 @@ import type { IUserCarRepository } from "../../repositories/interfaces/IUserCarR
 import type { IUserRepository } from "../../repositories/interfaces/IUserRepository";
 import { asaasCancelSubscription } from "../../utils/asaas/asaasSubscriptions";
 import type { ActivateSubscriptionDTO } from "./dto/ActivateSubscriptionDTO";
+import type { CreateSubscriptionDTO } from "./dto/CreateSubscriptionDTO";
 import type { UpdateSubscriptionDTO } from "./dto/UpdateSubscriptionDTO";
 
 export class SubscriptionService {
@@ -132,6 +133,81 @@ export class SubscriptionService {
 		return await this.subscriptionRepository.findByUserId(userId, true);
 	}
 
+	// Função para criar uma assinatura manualmente (apenas ADMIN)
+	public async createSubscription(
+		data: CreateSubscriptionDTO,
+	): Promise<Subscription> {
+		// Verificar se o usuário existe
+		const user = await this.userRepository.findById(data.userId);
+		if (!user) {
+			throw new AppError("Usuário não encontrado", 404);
+		}
+
+		// Verificar se o plano existe
+		const plan = await this.planRepository.findById(data.planId);
+		if (!plan) {
+			throw new AppError("Plano não encontrado", 404);
+		}
+
+		// Verificar se o carro existe (se fornecido)
+		if (data.carId) {
+			const car = await this.carRepository.findById(data.carId);
+			if (!car) {
+				throw new AppError("Veículo não encontrado", 404);
+			}
+		}
+
+		// Calcular datas
+		const now = new Date();
+		const startDate = data.startDate ? new Date(data.startDate) : now;
+		
+		let endDate: Date;
+		if (data.endDate) {
+			endDate = new Date(data.endDate);
+		} else {
+			endDate = new Date(startDate);
+			const planType = plan.periodicityType?.toUpperCase() || "MONTH";
+			
+			switch (planType) {
+				case "QUARTER":
+				case "QUARTERLY":
+				case "TRIMESTER":
+				case "TRIMESTRAL":
+					endDate.setMonth(endDate.getMonth() + 3);
+					break;
+				case "SEMESTER":
+				case "SEMESTRAL":
+				case "SEMIANNUAL":
+				case "SEMIANNUALLY":
+					endDate.setMonth(endDate.getMonth() + 6);
+					break;
+				case "YEAR":
+				case "YEARLY":
+				case "ANNUAL":
+					endDate.setFullYear(endDate.getFullYear() + 1);
+					break;
+				default: // MONTH, MONTHLY
+					endDate.setMonth(endDate.getMonth() + 1);
+					break;
+			}
+		}
+
+		// Criar a assinatura
+		return await this.subscriptionRepository.create({
+			userId: data.userId,
+			carId: data.carId,
+			planId: data.planId,
+			planType: plan.periodicityType || "MONTH",
+			amount: plan.price || 0,
+			isActive: true,
+			startDate,
+			endDate,
+			expiresAt: endDate,
+			paymentMethod: "MANUAL",
+		} as any);
+	}
+
+	// Função para ativar uma assinatura (apenas ADMIN)
 	public async activateSubscription(
 		subscriptionId: number,
 		data: ActivateSubscriptionDTO,

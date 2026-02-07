@@ -53,4 +53,8 @@ router.post("/:id/activate", authMiddleware, (req, res, next) =>
 	subscriptionController.activateSubscription(req, res, next),
 );
 
+router.post("/create", authMiddleware, (req, res, next) =>
+	subscriptionController.createSubscription(req, res, next),
+);
+
 export default router;
