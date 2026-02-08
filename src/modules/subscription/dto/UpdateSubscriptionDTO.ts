@@ -8,6 +8,7 @@ export const UpdateSubscriptionSchema = z.object({
 	carId: z.number({
 		required_error: "ID do veículo é obrigatório",
 	}),
+	isActive: z.boolean(),
 });
 
 export type UpdateSubscriptionDTO = z.infer<typeof UpdateSubscriptionSchema>;

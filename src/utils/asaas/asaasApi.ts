@@ -23,10 +23,10 @@ const rejectUnauthorizedEnv = process.env.ASAAS_REJECT_UNAUTHORIZED;
 // Se a variável estiver explicitamente definida como "false", não rejeitar
 // Se estiver em desenvolvimento, não rejeitar por padrão
 // Caso contrário, rejeitar (produção com validação ativa)
-const shouldRejectUnauthorized = rejectUnauthorizedEnv === "false" 
-	? false 
-	: isDevelopment 
-		? false 
+const shouldRejectUnauthorized = rejectUnauthorizedEnv === "false"
+	? false
+	: isDevelopment
+		? false
 		: true;
 
 const httpsAgent = new https.Agent({
@@ -36,7 +36,7 @@ const httpsAgent = new https.Agent({
 if (!shouldRejectUnauthorized) {
 	console.warn(
 		"[asaasApi] SSL certificate validation está desabilitada.",
-		isDevelopment 
+		isDevelopment
 			? "Isso é seguro em desenvolvimento."
 			: "Certifique-se de que isso é necessário (ex: proxy corporativo).",
 	);

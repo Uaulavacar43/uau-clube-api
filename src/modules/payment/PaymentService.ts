@@ -21,7 +21,9 @@ import {
 import { asaasGetOrCreateRandomPixKey } from "../../utils/asaas/asaasPixKeys";
 import {
 	asaasCreateSubscription,
+	asaasGetSubscription,
 	asaasListSubscriptionPayments,
+	asaasListSubscriptions,
 } from "../../utils/asaas/asaasSubscriptions";
 import {
 	ASAASPaymentBillingTypeEnum,
@@ -54,7 +56,7 @@ export class PaymentService {
 		private washServiceRepository: IWashServiceRepository,
 		private individualServicePurchaseRepository: IIndividualServicePurchaseRepository,
 		private carRepository: IUserCarRepository,
-	) {}
+	) { }
 
 	public async createPayment(data: CreatePaymentDTO, userId: number) {
 		const loggedUser = await this.userRepository.findById(userId);
@@ -122,9 +124,9 @@ export class PaymentService {
 			discount: !coupon
 				? undefined
 				: {
-						value: coupon.discountValue,
-						type: coupon.discountType,
-					},
+					value: coupon.discountValue,
+					type: coupon.discountType,
+				},
 			creditCard: data.creditCard,
 			creditCardHolderInfo: data.creditCardHolderInfo,
 		});
@@ -262,7 +264,7 @@ export class PaymentService {
 		const cpfCnpj = data.creditCardHolderInfo?.cpfCnpj ?? cpf;
 		const customerEmail = data.creditCardHolderInfo?.email ?? loggedUser.email;
 		const customerPhone = data.creditCardHolderInfo?.phone ?? loggedUser.phone;
-		
+
 		console.log("[subscribeToPlan] Dados do cliente para ASAAS:", {
 			name: loggedUser.name,
 			cpfCnpj: cpfCnpj ? `${cpfCnpj.substring(0, 3)}***` : "NÃO FORNECIDO",
@@ -476,13 +478,14 @@ export class PaymentService {
 					couponId: coupon?.id,
 					planId: plan.id,
 					subId: subscription.id,
+					carId: data.carId,
 				}),
 				discount: !coupon
 					? undefined
 					: {
-							value: coupon.discountValue,
-							type: coupon.discountType,
-						},
+						value: coupon.discountValue,
+						type: coupon.discountType,
+					},
 				creditCard: data.creditCard,
 				creditCardHolderInfo: data.creditCardHolderInfo,
 			});
@@ -558,6 +561,275 @@ export class PaymentService {
 				payment: result.payment,
 			};
 		}
+	}
+
+	/**
+	 * Verifica se o usuário possui assinatura ativa no Asaas e ativa localmente se necessário.
+	 */
+	public async activateSubscriptionIfActiveInAsaas(userId: number) {
+		const user = await this.userRepository.findById(userId);
+		if (!user) {
+			throw new AppError("Usuário não encontrado", 404);
+		}
+
+		if (!user.cpf) {
+			throw new AppError("Usuário sem CPF cadastrado", 400);
+		}
+
+		// Buscar customer ID no Asaas
+		const asaasCustomer = await asaasGetOrCreateCustomerByCpfCnpj({
+			name: user.name,
+			cpfCnpj: user.cpf,
+			email: user.email,
+			phone: user.phone ?? undefined,
+		});
+
+		if (!asaasCustomer?.id) {
+			throw new AppError("Cliente não encontrado no Asaas", 404);
+		}
+
+		// Listar assinaturas do cliente
+		const subscriptionsResponse = await asaasListSubscriptions(asaasCustomer.id);
+		const activeSubscription = subscriptionsResponse.data.find(
+			(sub) => sub.status === "ACTIVE",
+		);
+
+		console.log("[activateSubscriptionIfActiveInAsaas] Assinatura ativa no Asaas:", activeSubscription);
+
+		if (!activeSubscription) {
+			return { message: "Nenhuma assinatura ativa encontrada no Asaas" };
+		}
+
+		const subscriptionPayments = await asaasListSubscriptionPayments(
+			activeSubscription.id,
+		);
+		const payments = subscriptionPayments.data;
+
+		const hasOverduePayment = payments.some(
+			(p) => p.status === ASAASPaymentStatusEnum.OVERDUE,
+		);
+
+		if (hasOverduePayment) {
+			console.log(
+				"[activateSubscriptionIfActiveInAsaas] Assinatura possui pagamentos em atraso.",
+			);
+			return { message: "Assinatura ativa, mas com pagamento em atraso" };
+		}
+
+		const hasPaidPayment = payments.some(
+			(p) =>
+				p.status === ASAASPaymentStatusEnum.CONFIRMED ||
+				p.status === ASAASPaymentStatusEnum.RECEIVED ||
+				p.status === ASAASPaymentStatusEnum.RECEIVED_IN_CASH,
+		);
+
+		if (!hasPaidPayment) {
+			console.log(
+				"[activateSubscriptionIfActiveInAsaas] Assinatura não possui nenhum pagamento confirmado.",
+			);
+			return { message: "Assinatura ativa, mas aguardando primeiro pagamento" };
+		}
+
+		// Se tiver assinatura ativa, verificar localmente
+		let subId: number | undefined;		// Tentar criar assinatura local se tivermos informações suficientes
+		let planId: number | undefined;
+		let carId: number | undefined;
+
+		try {
+			if (activeSubscription.externalReference) {
+				const externalRef = JSON.parse(activeSubscription.externalReference);
+				subId = externalRef.subId;
+				planId = externalRef.planId;
+				carId = externalRef.carId;
+			}
+		} catch (e) {
+			console.warn("Erro ao fazer parse do externalReference", e);
+		}
+
+		if (!carId) {
+			const carExistsWithUser = await this.carRepository.findByUserId(userId);
+			console.log("[activateSubscriptionIfActiveInAsaas] carExistsWithUser:", carExistsWithUser);
+			if (carExistsWithUser) {
+				carId = carExistsWithUser[0].id;
+			}
+		}
+
+		let updateData: Partial<Omit<Subscription, "car" | "id" | "plan" | "coupon">> = {
+			isActive: true,
+			planId,
+		};
+		console.log("[activateSubscriptionIfActiveInAsaas] planId:", planId);
+		console.log("[activateSubscriptionIfActiveInAsaas] carId:", carId);
+
+
+		console.log("[activateSubscriptionIfActiveInAsaas] updateData:", updateData);
+		// Se tivermos subId, buscamos a assinatura local
+		if (subId) {
+			const localSubscription = await this.subscriptionRepository.findById(subId);
+			if (localSubscription) {
+				const updatedSubscription = await this.subscriptionRepository.update(
+					localSubscription.id,
+					updateData,
+				);
+
+				return {
+					message: "Assinatura sincronizada e ativada com sucesso",
+					subscription: updatedSubscription,
+				};
+			}
+		}
+
+		// Se não achou por ID, tenta buscar pelo ID do Asaas
+		const localSubByAsaasId = await this.subscriptionRepository.getByAsaasId(
+			activeSubscription.id,
+		);
+		if (localSubByAsaasId) {
+			const updatedSubscription = await this.subscriptionRepository.update(
+				localSubByAsaasId.id,
+				updateData,
+			);
+			return {
+				message: "Assinatura sincronizada e ativada com sucesso",
+				subscription: updatedSubscription,
+			};
+		}
+
+
+		if (planId) {
+			try {
+				const result = await this.createLocalSubscriptionFromAsaas(
+					userId,
+					planId,
+					carId,
+					activeSubscription.id,
+				);
+				return {
+					message:
+						"Assinatura ativa encontrada no Asaas e criada localmente com sucesso.",
+					subscription: result.subscription,
+					payment: result.payment,
+				};
+			} catch (error) {
+				console.error("Erro ao criar assinatura local automaticamente:", error);
+			}
+		}
+
+		return {
+			message: "Assinatura ativa encontrada no Asaas, mas não vinculada localmente.",
+			asaasSubscription: activeSubscription,
+		};
+	}
+
+	/**
+	 * Cria uma assinatura local a partir de uma assinatura já existente no Asaas.
+	 * Útil para migração ou correções manuais.
+	 */
+	public async createLocalSubscriptionFromAsaas(
+		userId: number,
+		planId: number,
+		carId: number | undefined,
+		asaasSubscriptionId: string,
+	) {
+		// 1. Validar entidades locais
+		const user = await this.userRepository.findById(userId);
+		if (!user) {
+			throw new AppError("Usuário não encontrado", 404);
+		}
+
+		const plan = await this.planRepository.findById(planId);
+		if (!plan) {
+			throw new AppError("Plano não encontrado", 404);
+		}
+
+		let car;
+		if (carId) {
+			car = await this.carRepository.findById(carId);
+			if (!car) {
+				throw new AppError("Carro não encontrado", 404);
+			}
+
+			// 2. Validar se o carro já tem assinatura
+			const hasSubscription = await this.carHasSubscription(car.licensePlate);
+			if (hasSubscription) {
+				throw new AppError(
+					"Este carro já tem assinatura ativa. Cancele a atual antes de vincular uma nova.",
+					400,
+				);
+			}
+		}
+
+		// 3. Buscar dados da assinatura no Asaas
+		let asaasSubscription;
+		try {
+			asaasSubscription = await asaasGetSubscription(asaasSubscriptionId);
+		} catch (error) {
+			throw new AppError("Assinatura não encontrada no Asaas", 404);
+		}
+
+		if (!asaasSubscription) {
+			throw new AppError("Assinatura não encontrada no Asaas", 404);
+		}
+
+
+		// 5. Tentar buscar o último pagamento para registrar localmente
+		let payment = null;
+		let subscription = null;
+		try {
+			const paymentsResponse = await asaasListSubscriptionPayments(
+				asaasSubscription.id,
+			);
+			const confirmedPayment = paymentsResponse.data.find(
+				(p) =>
+					p.status === "CONFIRMED" ||
+					p.status === "RECEIVED" ||
+					p.status === "RECEIVED_IN_CASH",
+			);
+
+			if (confirmedPayment) {
+				// 4. Criar assinatura local
+				subscription = await this.subscriptionRepository.create(
+					new Subscription({
+						userId: user.id,
+						planId: plan.id,
+						planType: String(plan.periodicityType),
+						amount: plan.price,
+						isActive: asaasSubscription.status === "ACTIVE",
+						startDate: new Date(asaasSubscription.dateCreated),
+						endDate: new Date(asaasSubscription.nextDueDate),
+						carId: car?.id,
+						paymentMethod: asaasSubscription.billingType,
+						subscriptionIdAsaas: asaasSubscription.id,
+						couponId: null, // Pode ser passado se necessário, mas assumindo sem cupom para simplificar
+					}),
+				);
+				payment = await this.paymentRepository.create({
+					id: 0,
+					userId: user.id,
+					planId: plan.id,
+					amount: confirmedPayment.value,
+					status: "PAID",
+					installments: confirmedPayment.installmentNumber,
+					paymentDate: new Date(confirmedPayment.paymentDate || new Date()),
+					createdAt: new Date(confirmedPayment.dateCreated),
+					updatedAt: new Date(),
+					paymentIdAsaas: confirmedPayment.id,
+					couponId: null,
+					pixQrCode: null,
+					pixPayload: null,
+				});
+			}
+		} catch (e) {
+			console.warn(
+				"[createLocalSubscriptionFromAsaas] Não foi possível recuperar pagamentos do Asaas",
+				e,
+			);
+		}
+
+		return {
+			message: "Assinatura local criada e vinculada com sucesso",
+			subscription,
+			payment,
+		};
 	}
 
 	/**
@@ -766,43 +1038,44 @@ export class PaymentService {
 					planId: plan.id,
 					couponId: coupon?.id,
 					subId: subscription.id,
+					carId: data.carId,
 				}),
 
 				// dados do cartão de crédito
 				creditCard: !data.creditCard
 					? undefined
 					: {
-							holderName: data.creditCard.holderName,
-							number: data.creditCard.number,
-							expiryMonth: data.creditCard.expiryMonth,
-							expiryYear: data.creditCard.expiryYear,
-							ccv: data.creditCard.ccv,
-						},
+						holderName: data.creditCard.holderName,
+						number: data.creditCard.number,
+						expiryMonth: data.creditCard.expiryMonth,
+						expiryYear: data.creditCard.expiryYear,
+						ccv: data.creditCard.ccv,
+					},
 
 				// dados do titular do cartão
 				creditCardHolderInfo: !data.creditCardHolderInfo
 					? undefined
 					: {
-							name: data.creditCardHolderInfo.name,
-							email: data.creditCardHolderInfo.email,
-							cpfCnpj: data.creditCardHolderInfo.cpfCnpj,
-							phone: data.creditCardHolderInfo.phone,
-							postalCode: data.creditCardHolderInfo.postalCode,
-							addressNumber: data.creditCardHolderInfo.addressNumber,
-							addressComplement:
-								data.creditCardHolderInfo.addressComplement ?? "",
-							mobilePhone:
-								data.creditCardHolderInfo.mobilePhone ??
-								data.creditCardHolderInfo.phone,
-						},
+						name: data.creditCardHolderInfo.name,
+						email: data.creditCardHolderInfo.email,
+						cpfCnpj: data.creditCardHolderInfo.cpfCnpj,
+						phone: data.creditCardHolderInfo.phone,
+						postalCode: data.creditCardHolderInfo.postalCode,
+						addressNumber: data.creditCardHolderInfo.addressNumber,
+						addressComplement:
+							data.creditCardHolderInfo.addressComplement ?? "",
+						mobilePhone:
+							data.creditCardHolderInfo.mobilePhone ??
+							data.creditCardHolderInfo.phone,
+					},
 
 				// desconto no plano
 				discount: !coupon
 					? undefined
 					: {
-							value: coupon.discountValue,
-							type: coupon.discountType,
-						},
+						value: coupon.discountValue,
+						type: coupon.discountType,
+					},
 			};
 
 			console.log(
@@ -817,6 +1090,7 @@ export class PaymentService {
 			subscription.subscriptionIdAsaas = asaasSubscription.id;
 			subscription.amount = asaasSubscription.value;
 			subscription.paymentMethod = billingType;
+			subscription.endDate = new Date(asaasSubscription.nextDueDate);
 			await this.subscriptionRepository.update(subscription.id, subscription);
 
 			let pixQrCode: string | null = null;

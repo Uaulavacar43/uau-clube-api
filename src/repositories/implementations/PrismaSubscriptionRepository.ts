@@ -12,6 +12,14 @@ import { UserCar } from "../../entities/UserCar";
 import type { ISubscriptionRepository } from "../interfaces/ISubscriptionRepository";
 
 export class PrismaSubscriptionRepository implements ISubscriptionRepository {
+	public async findAll(): Promise<Subscription[]> {
+		const subscription = await prisma.subscription.findMany({
+			include: {
+				car: true,
+			},
+		});
+		return subscription.map(sub => this.mapToEntity(sub));
+	}
 	public async findByUserAndCar(
 		userId: number,
 		carId: number,
@@ -44,7 +52,6 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
 		const subscriptions = await prisma.subscription.findMany({
 			where: {
 				userId,
-				isActive: true,
 			},
 			include: {
 				car: includeCars,
@@ -127,6 +134,12 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
 		});
 	}
 
+	public async delete(subscriptionId: number): Promise<void> {
+		await prisma.subscription.delete({
+			where: { id: subscriptionId },
+		});
+	}
+
 	public async getByAsaasId(
 		subscriptionIdAsaas: string,
 	): Promise<Subscription | null> {
@@ -192,47 +205,47 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
 			coupon: !subscription.coupon
 				? undefined
 				: new Coupon(
-						subscription.coupon.id,
-						subscription.coupon.code,
-						subscription.coupon.description,
-						subscription.coupon.discountType,
-						subscription.coupon.discountValue,
-						subscription.coupon.validFrom,
-						subscription.coupon.validUntil,
-						subscription.coupon.isActive,
-						subscription.coupon.currentUsage,
-						subscription.coupon.createdAt,
-						subscription.coupon.updatedAt,
-						subscription.coupon.additionalInfo,
-						subscription.coupon.maxDiscountValue,
-						subscription.coupon.usageLimit,
-					),
+					subscription.coupon.id,
+					subscription.coupon.code,
+					subscription.coupon.description,
+					subscription.coupon.discountType,
+					subscription.coupon.discountValue,
+					subscription.coupon.validFrom,
+					subscription.coupon.validUntil,
+					subscription.coupon.isActive,
+					subscription.coupon.currentUsage,
+					subscription.coupon.createdAt,
+					subscription.coupon.updatedAt,
+					subscription.coupon.additionalInfo,
+					subscription.coupon.maxDiscountValue,
+					subscription.coupon.usageLimit,
+				),
 			car: !subscription.car
 				? undefined
 				: new UserCar(
-						subscription.car.id,
-						subscription.car.plate,
-						subscription.car.color,
-						subscription.car.model,
-						subscription.car.brand,
-						subscription.car.year,
-						subscription.car.userId,
-					),
+					subscription.car.id,
+					subscription.car.plate,
+					subscription.car.color,
+					subscription.car.model,
+					subscription.car.brand,
+					subscription.car.year,
+					subscription.car.userId,
+				),
 			plan: !subscription.plan
 				? undefined
 				: new Plan({
-						id: subscription.plan.id,
-						name: subscription.plan.name,
-						description: subscription.plan.description,
-						price: subscription.plan.price,
-						duration: subscription.plan.duration,
-						isBestChoice: subscription.plan.isBestChoice,
-						periodicityType: subscription.plan
-							.periodicityType as PeriodicityType,
-						isPackage: subscription.plan.isPackage,
-						createdAt: subscription.plan.createdAt,
-						updatedAt: subscription.plan.updatedAt,
-					}),
+					id: subscription.plan.id,
+					name: subscription.plan.name,
+					description: subscription.plan.description,
+					price: subscription.plan.price,
+					duration: subscription.plan.duration,
+					isBestChoice: subscription.plan.isBestChoice,
+					periodicityType: subscription.plan
+						.periodicityType as PeriodicityType,
+					isPackage: subscription.plan.isPackage,
+					createdAt: subscription.plan.createdAt,
+					updatedAt: subscription.plan.updatedAt,
+				}),
 		});
 	}
 }

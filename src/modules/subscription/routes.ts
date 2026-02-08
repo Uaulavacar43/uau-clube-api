@@ -35,6 +35,10 @@ const router = Router();
 // );
 
 router.get("/", authMiddleware, (req, res, next) =>
+	subscriptionController.listSubscriptionsByUser(req, res, next),
+);
+
+router.get("/all", authMiddleware, (req, res, next) =>
 	subscriptionController.listSubscriptions(req, res, next),
 );
 

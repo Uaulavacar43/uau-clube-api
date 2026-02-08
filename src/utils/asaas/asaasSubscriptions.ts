@@ -1,6 +1,7 @@
 import { asaasApi } from "./asaasApi";
 import type {
 	ASAASCreateSubscriptionDTO,
+	ASAASSubscriptionListResponse,
 	ASAASSubscriptionPaymentListResponse,
 	ASAASSubscriptionResponse,
 	ASAASUpdateSubscriptionDTO,
@@ -42,7 +43,7 @@ export async function asaasUpdateSubscription(
 
 export async function asaasListSubscriptions(
 	customerId: string,
-): Promise<ASAASSubscriptionResponse> {
+): Promise<ASAASSubscriptionListResponse> {
 	const response = await asaasApi.get(`/subscriptions`, {
 		params: {
 			customer: customerId,

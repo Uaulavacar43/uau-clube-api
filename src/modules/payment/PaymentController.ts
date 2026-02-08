@@ -5,10 +5,12 @@ import type { CreatePaymentDTO } from "./dto/CreatePaymentDTO";
 import type { CreateSubscriptionToPlanDTO } from "./dto/CreateSubscriptionToPlanDTO";
 import type { GetAllPaymentsWithDetailsDTO } from "./dto/GetAllPaymentsWithDetailsDTO";
 import { UpdatePaymentStatusSchema } from "./dto/UpdatePaymentStatusDTO";
+import type { ActivateSubscriptionDTO } from "./dto/ActivateSubscriptionDTO";
+import type { CreateLocalSubscriptionFromAsaasDTO } from "./dto/CreateLocalSubscriptionFromAsaasDTO";
 import type { PaymentService } from "./PaymentService";
 
 export class PaymentController {
-	constructor(private paymentService: PaymentService) {}
+	constructor(private paymentService: PaymentService) { }
 
 	public async createPayment(
 		req: Request,
@@ -200,6 +202,43 @@ export class PaymentController {
 			const result = await this.paymentService.paymentWebhook(webhookBody);
 
 			res.status(200).customJson(result);
+		} catch (error) {
+			next(error);
+		}
+	}
+
+	public async activateSubscription(
+		req: Request,
+		res: Response,
+		next: NextFunction,
+	): Promise<void> {
+		try {
+			const { userId } = res.locals as ActivateSubscriptionDTO;
+			const result =
+				await this.paymentService.activateSubscriptionIfActiveInAsaas(userId);
+
+			res.status(200).customJson(result);
+		} catch (error) {
+			next(error);
+		}
+	}
+
+	public async createLocalSubscriptionFromAsaas(
+		req: Request,
+		res: Response,
+		next: NextFunction,
+	): Promise<void> {
+		try {
+			const data = res.locals as CreateLocalSubscriptionFromAsaasDTO;
+			const result =
+				await this.paymentService.createLocalSubscriptionFromAsaas(
+					data.userId,
+					data.planId,
+					data.carId,
+					data.asaasSubscriptionId,
+				);
+
+			res.status(201).customJson(result);
 		} catch (error) {
 			next(error);
 		}

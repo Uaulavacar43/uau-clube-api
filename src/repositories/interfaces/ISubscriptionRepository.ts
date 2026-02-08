@@ -3,9 +3,10 @@
 import type { Subscription } from "../../entities/Subscription";
 
 export interface ISubscriptionRepository {
+	findAll(): Promise<Subscription[]>;
+	findByUserId(userId: number, includeCars?: boolean): Promise<Subscription[]>;
 	findByUserAndCar(userId: number, carId: number): Promise<Subscription | null>;
 	findById(id: number, includeCars?: boolean): Promise<Subscription | null>;
-	findByUserId(userId: number, includeCars?: boolean): Promise<Subscription[]>;
 	findByCarLicensePlate(licensePlate: string): Promise<Subscription | null>;
 
 	// CREATE / UPDATE / CANCEL
@@ -15,6 +16,7 @@ export interface ISubscriptionRepository {
 		data: Partial<Omit<Subscription, "car" | "id" | "plan">>,
 	): Promise<Subscription>;
 	cancel(subscriptionId: number): Promise<void>;
+	delete(subscriptionId: number): Promise<void>;
 
 	getByAsaasId(subscriptionIdAsaas: string): Promise<Subscription | null>;
 	getByInstallmentIdAsaas(
