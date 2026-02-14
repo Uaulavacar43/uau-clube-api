@@ -187,6 +187,8 @@ export class AsaasSyncService {
 
         const telefoneFinal: string = telefoneSanitizado ?? "";
         const cpfFinal: string | null = cpfSanitizado;
+        console.log(cpfFinal, emailSanitizado);
+
 
         // CRIAÇÃO
         if (usuarioExistente === null) {
@@ -237,11 +239,11 @@ export class AsaasSyncService {
             cpf !== null && cpf !== ""
                 ? cpf
                 : nome
-                .toLowerCase()
-                .normalize("NFD")
-                .replace(/[\u0300-\u036f]/g, "")
-                .replace(/[^a-z0-9]+/g, "-")
-                .replace(/^-+|-+$/g, "") || "cliente";
+                    .toLowerCase()
+                    .normalize("NFD")
+                    .replace(/[\u0300-\u036f]/g, "")
+                    .replace(/[^a-z0-9]+/g, "-")
+                    .replace(/^-+|-+$/g, "") || "cliente";
 
         return `${base}@placeholder.uau`;
     }

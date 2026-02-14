@@ -14,7 +14,7 @@ if (!process.env.DATABASE_URL) {
 }
 
 const prisma = new PrismaClient({
-	log: isProduction ? ["error", "warn"] : ["query", "error", "warn"],
+	log: isProduction ? ["error", "warn"] : ["error", "warn"],
 	// O Prisma gerencia connection pooling automaticamente
 	// Não precisa configurar datasources explicitamente - lê de DATABASE_URL
 });

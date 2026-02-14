@@ -6,7 +6,7 @@ import type { UpdateSubscriptionDTO } from "./dto/UpdateSubscriptionDTO";
 import type { SubscriptionService } from "./SubscriptionService";
 
 export class SubscriptionController {
-	constructor(private subscriptionService: SubscriptionService) {}
+	constructor(private subscriptionService: SubscriptionService) { }
 
 	// public async registerSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
 	// 	try {
@@ -39,7 +39,7 @@ export class SubscriptionController {
 		}
 	}
 
-	public async listSubscriptions(
+	public async listSubscriptionsByUser(
 		req: Request,
 		res: Response,
 		next: NextFunction,
@@ -48,15 +48,31 @@ export class SubscriptionController {
 			if (!req.user) {
 				throw new AppError("Não autorizado", 401);
 			}
+			console.log(req);
+			const userId = Number(req.query.userId) || req.user.id;
 
-			const subscriptions = await this.subscriptionService.listSubscriptions(
-				req.user.id,
+			const subscriptions = await this.subscriptionService.listSubscriptionsByUserID(
+				userId,
 			);
 			res.status(200).customJson(subscriptions);
 		} catch (error) {
 			next(error);
 		}
 	}
+
+	public async listSubscriptions(
+		req: Request,
+		res: Response,
+		next: NextFunction,
+	): Promise<void> {
+		try {
+			const subscriptions = await this.subscriptionService.listSubscriptions();
+			res.status(200).customJson(subscriptions);
+		} catch (error) {
+			next(error);
+		}
+	}
+
 
 	public async updateSubscription(
 		req: Request,

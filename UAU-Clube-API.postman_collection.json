@@ -1,0 +1,2004 @@
+{
+	"info": {
+		"_postman_id": "uau-clube-api-collection",
+		"name": "UAU Clube API",
+		"description": "Complete API collection for UAU Clube application",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/health",
+							"host": ["{{baseUrl}}"],
+							"path": ["health"]
+						},
+						"description": "Health check endpoint to verify if the API is running"
+					}
+				}
+			]
+		},
+		{
+			"name": "Authentication",
+			"item": [
+				{
+					"name": "Register User",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"John Doe\",\n  \"email\": \"john.doe@example.com\",\n  \"password\": \"password123\",\n  \"phone\": \"+5511999999999\",\n  \"cpf\": \"12345678901\",\n  \"firebaseToken\": \"optional-firebase-token\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/register",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "register"]
+						}
+					}
+				},
+				{
+					"name": "Login",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"john.doe@example.com\",\n  \"password\": \"password123\",\n  \"firebaseToken\": \"optional-firebase-token\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/login",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "login"]
+						}
+					}
+				},
+				{
+					"name": "Get Firebase Token",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/auth/firebase-token/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "firebase-token", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Refresh Token",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refreshToken\": \"your-refresh-token-here\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/refresh-token",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "refresh-token"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Dashboard",
+			"item": [
+				{
+					"name": "Get Dashboard Data",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/dashboard",
+							"host": ["{{baseUrl}}"],
+							"path": ["dashboard"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Wash Services",
+			"item": [
+				{
+					"name": "Create Wash Service",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Lavagem Completa\",\n  \"price\": 50.00,\n  \"imageUrl\": \"https://example.com/image.jpg\",\n  \"isAvailable\": true,\n  \"adminId\": 1\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wash-services",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-services"]
+						}
+					}
+				},
+				{
+					"name": "List Services with Locations",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/wash-services",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-services"]
+						}
+					}
+				},
+				{
+					"name": "Get Service by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/wash-services/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-services", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "List Top Sold Services",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/wash-services/top-sold",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-services", "top-sold"]
+						}
+					}
+				},
+				{
+					"name": "Update Wash Service",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Lavagem Premium\",\n  \"price\": 75.00,\n  \"imageUrl\": \"https://example.com/new-image.jpg\",\n  \"isAvailable\": true\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wash-services/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-services", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Delete Wash Service",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/wash-services/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-services", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "User Car",
+			"item": [
+				{
+					"name": "Register User Car",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": 1,\n  \"licensePlate\": \"ABC1234\",\n  \"brand\": \"Toyota\",\n  \"model\": \"Corolla\",\n  \"color\": \"White\",\n  \"year\": 2020\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/user-car",
+							"host": ["{{baseUrl}}"],
+							"path": ["user-car"]
+						}
+					}
+				},
+				{
+					"name": "List User Cars",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/user-car",
+							"host": ["{{baseUrl}}"],
+							"path": ["user-car"]
+						}
+					}
+				},
+				{
+					"name": "Get User Cars by User ID",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/user-car/user/:userId",
+							"host": ["{{baseUrl}}"],
+							"path": ["user-car", "user", ":userId"],
+							"variable": [
+								{
+									"key": "userId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update User Car",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"licensePlate\": \"XYZ5678\",\n  \"brand\": \"Honda\",\n  \"model\": \"Civic\",\n  \"color\": \"Black\",\n  \"year\": 2021\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/user-car/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["user-car", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Delete User Car",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/user-car/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["user-car", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Subscription",
+			"item": [
+				{
+					"name": "List Subscriptions",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/subscription",
+							"host": ["{{baseUrl}}"],
+							"path": ["subscription"]
+						}
+					}
+				},
+				{
+					"name": "Update Subscription",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"ACTIVE\",\n  \"expiresAt\": \"2024-12-31T23:59:59.000Z\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/subscription/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["subscription", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Cancel Subscription",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/subscription/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["subscription", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Daily Wash",
+			"item": [
+				{
+					"name": "Use Daily Wash",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": 1,\n  \"userCarId\": 1,\n  \"washLocationId\": 1,\n  \"washServiceId\": 1\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/daily-wash/use",
+							"host": ["{{baseUrl}}"],
+							"path": ["daily-wash", "use"]
+						}
+					}
+				},
+				{
+					"name": "Check Daily Wash Availability",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/daily-wash/availability?userId=1&date=2024-01-27",
+							"host": ["{{baseUrl}}"],
+							"path": ["daily-wash", "availability"],
+							"query": [
+								{
+									"key": "userId",
+									"value": "1"
+								},
+								{
+									"key": "date",
+									"value": "2024-01-27"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get User Wash History",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/daily-wash/user/:userId/history",
+							"host": ["{{baseUrl}}"],
+							"path": ["daily-wash", "user", ":userId", "history"],
+							"variable": [
+								{
+									"key": "userId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Users (Admin)",
+			"item": [
+				{
+					"name": "Create User",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Jane Doe\",\n  \"email\": \"jane.doe@example.com\",\n  \"password\": \"password123\",\n  \"phone\": \"+5511888888888\",\n  \"cpf\": \"98765432100\",\n  \"role\": \"USER\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/users",
+							"host": ["{{baseUrl}}"],
+							"path": ["users"]
+						}
+					}
+				},
+				{
+					"name": "Get All Users",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/users?page=1&limit=10",
+							"host": ["{{baseUrl}}"],
+							"path": ["users"],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get User by ID",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/users/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get User by License Plate",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/users/license-plate/:licensePlate",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", "license-plate", ":licensePlate"],
+							"variable": [
+								{
+									"key": "licensePlate",
+									"value": "ABC1234"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Users by Role",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/users/role/:role",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", "role", ":role"],
+							"variable": [
+								{
+									"key": "role",
+									"value": "USER"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update User",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Jane Updated\",\n  \"email\": \"jane.updated@example.com\",\n  \"phone\": \"+5511777777777\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/users/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Delete User",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/users/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Individual Service Purchase",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"USED\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/users/individual-service-purchase/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", "individual-service-purchase", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Count All Users",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/users/count/all",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", "count", "all"]
+						}
+					}
+				},
+				{
+					"name": "Count Active Subscribers",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/users/count/active-subscribers",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", "count", "active-subscribers"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Wash Location",
+			"item": [
+				{
+					"name": "Register Wash Location",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Lavagem Central\",\n  \"address\": \"Rua Example, 123\",\n  \"city\": \"São Paulo\",\n  \"state\": \"SP\",\n  \"zipCode\": \"01234-567\",\n  \"latitude\": -23.5505,\n  \"longitude\": -46.6333,\n  \"managerId\": 1\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wash-location",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location"]
+						}
+					}
+				},
+				{
+					"name": "Register Complete Wash Location",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Lavagem Premium\",\n  \"address\": \"Rua Example, 456\",\n  \"city\": \"São Paulo\",\n  \"state\": \"SP\",\n  \"zipCode\": \"01234-567\",\n  \"latitude\": -23.5505,\n  \"longitude\": -46.6333,\n  \"managerId\": 1,\n  \"openingHours\": [\n    {\n      \"dayOfWeek\": 1,\n      \"openTime\": \"08:00\",\n      \"closeTime\": \"18:00\"\n    }\n  ],\n  \"services\": [1, 2, 3]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/complete",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", "complete"]
+						}
+					}
+				},
+				{
+					"name": "List Wash Locations",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/wash-location?page=1&limit=10",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location"],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Wash Locations by Manager",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/by-manager/:managerId",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", "by-manager", ":managerId"],
+							"variable": [
+								{
+									"key": "managerId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Wash Location Detail",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/detail/:locationId",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", "detail", ":locationId"],
+							"variable": [
+								{
+									"key": "locationId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Wash Location",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Lavagem Central Updated\",\n  \"address\": \"Rua Example, 789\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/:locationId",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", ":locationId"],
+							"variable": [
+								{
+									"key": "locationId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Complete Wash Location",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Lavagem Premium Updated\",\n  \"openingHours\": [\n    {\n      \"dayOfWeek\": 1,\n      \"openTime\": \"09:00\",\n      \"closeTime\": \"19:00\"\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/complete/:locationId",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", "complete", ":locationId"],
+							"variable": [
+								{
+									"key": "locationId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Opening Hours",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"openingHours\": [\n    {\n      \"dayOfWeek\": 1,\n      \"openTime\": \"08:00\",\n      \"closeTime\": \"18:00\"\n    },\n    {\n      \"dayOfWeek\": 2,\n      \"openTime\": \"08:00\",\n      \"closeTime\": \"18:00\"\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/opening-hours/:locationId",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", "opening-hours", ":locationId"],
+							"variable": [
+								{
+									"key": "locationId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Service Availability",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/service-availability/:locationId/:serviceId",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", "service-availability", ":locationId", ":serviceId"],
+							"variable": [
+								{
+									"key": "locationId",
+									"value": "1"
+								},
+								{
+									"key": "serviceId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Flow",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/flow/:locationId",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", "flow", ":locationId"],
+							"variable": [
+								{
+									"key": "locationId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Favorite Wash Location",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": 1\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/:locationId/favorite",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", ":locationId", "favorite"],
+							"variable": [
+								{
+									"key": "locationId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Delete Wash Location",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/wash-location/:locationId",
+							"host": ["{{baseUrl}}"],
+							"path": ["wash-location", ":locationId"],
+							"variable": [
+								{
+									"key": "locationId",
+									"value": "1"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "User Profile",
+			"item": [
+				{
+					"name": "Update User Profile",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"John Updated\",\n  \"email\": \"john.updated@example.com\",\n  \"phone\": \"+5511999999999\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/user-profile/profile/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["user-profile", "profile", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update User Password",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"currentPassword\": \"oldpassword123\",\n  \"newPassword\": \"newpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/user-profile/password/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["user-profile", "password", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Request Password Reset",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"user@example.com\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/user-profile/request-password-reset",
+							"host": ["{{baseUrl}}"],
+							"path": ["user-profile", "request-password-reset"]
+						}
+					}
+				},
+				{
+					"name": "Reset Password",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"reset-token-here\",\n  \"newPassword\": \"newpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/user-profile/reset-password",
+							"host": ["{{baseUrl}}"],
+							"path": ["user-profile", "reset-password"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Payment",
+			"item": [
+				{
+					"name": "Create Payment",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": 1,\n  \"plan_id\": 1,\n  \"cycle\": \"monthly\",\n  \"creditCard\": {\n    \"holderName\": \"JOHN DOE\",\n    \"number\": \"4111111111111111\",\n    \"expiryMonth\": \"12\",\n    \"expiryYear\": \"2025\",\n    \"ccv\": \"123\"\n  },\n  \"creditCardHolderInfo\": {\n    \"name\": \"John Doe\",\n    \"email\": \"john.doe@example.com\",\n    \"cpfCnpj\": \"12345678901\",\n    \"phone\": \"+5511999999999\",\n    \"postalCode\": \"01234-567\",\n    \"addressNumber\": \"123\",\n    \"addressComplement\": \"Apt 45\",\n    \"mobilePhone\": \"+5511999999999\"\n  },\n  \"washServiceId\": 1\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/payment",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment"]
+						}
+					}
+				},
+				{
+					"name": "Subscribe to Plan",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": 1,\n  \"planId\": 1,\n  \"userCarId\": 1,\n  \"cycle\": \"monthly\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/payment/subscribe",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "subscribe"]
+						}
+					}
+				},
+				{
+					"name": "Payment Webhook",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"event\": \"PAYMENT_RECEIVED\",\n  \"payment\": {\n    \"id\": \"pay_123456\",\n    \"customer\": \"cus_123456\",\n    \"value\": 100.00,\n    \"status\": \"CONFIRMED\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/payment/payments-webhook",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "payments-webhook"]
+						}
+					}
+				},
+				{
+					"name": "Update Payment Status",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"id\": 1,\n  \"status\": \"PAID\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/payment/update-status",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "update-status"]
+						}
+					}
+				},
+				{
+					"name": "Get Yearly Revenue History",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payment/history/yearly",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "history", "yearly"]
+						}
+					}
+				},
+				{
+					"name": "Get All Payments",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payment/all",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "all"]
+						}
+					}
+				},
+				{
+					"name": "Get Total Revenue",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payment/total-revenue",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "total-revenue"]
+						}
+					}
+				},
+				{
+					"name": "Get Current Month Revenue",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payment/current-month-revenue",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "current-month-revenue"]
+						}
+					}
+				},
+				{
+					"name": "Get Next Month Predicted Revenue",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payment/next-month-predicted-revenue",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "next-month-predicted-revenue"]
+						}
+					}
+				},
+				{
+					"name": "Get Detailed Payments",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payment/detailed-payments?page=1&limit=10",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "detailed-payments"],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Payment Details by ID",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payment/detail/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "detail", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get MRR (Monthly Recurring Revenue)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payment/mrr",
+							"host": ["{{baseUrl}}"],
+							"path": ["payment", "mrr"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Notifications",
+			"item": [
+				{
+					"name": "List Notifications",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/notifications/list",
+							"host": ["{{baseUrl}}"],
+							"path": ["notifications", "list"]
+						}
+					}
+				},
+				{
+					"name": "Send Notification",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"title\": \"Nova Promoção\",\n  \"description\": \"Desconto especial de 20% esta semana!\",\n  \"type\": \"ALL\",\n  \"isAutomatic\": false\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/notifications/send",
+							"host": ["{{baseUrl}}"],
+							"path": ["notifications", "send"]
+						}
+					}
+				},
+				{
+					"name": "Notify Payment Status",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/notifications/notify-payment-status",
+							"host": ["{{baseUrl}}"],
+							"path": ["notifications", "notify-payment-status"]
+						}
+					}
+				},
+				{
+					"name": "Notify Upcoming Subscription Expiry",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/notifications/notify-upcoming-expiry",
+							"host": ["{{baseUrl}}"],
+							"path": ["notifications", "notify-upcoming-expiry"]
+						}
+					}
+				},
+				{
+					"name": "Send Automatic Notifications",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/notifications/send-automatic",
+							"host": ["{{baseUrl}}"],
+							"path": ["notifications", "send-automatic"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Plans",
+			"item": [
+				{
+					"name": "Create Plan",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Plano Mensal\",\n  \"price\": 99.90,\n  \"duration\": 30\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/plans",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans"]
+						}
+					}
+				},
+				{
+					"name": "List All Plans",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/plans",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans"]
+						}
+					}
+				},
+				{
+					"name": "Get Plan by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/plans/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Plan",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Plano Mensal Premium\",\n  \"price\": 149.90,\n  \"duration\": 30\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/plans/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Delete Plan",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/plans/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "File Upload",
+			"item": [
+				{
+					"name": "Generate File URL",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"fileName\": \"example.jpg\",\n  \"fileType\": \"image/jpeg\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/file-upload",
+							"host": ["{{baseUrl}}"],
+							"path": ["file-upload"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Docs",
+			"item": [
+				{
+					"name": "Get Documentation",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/docs",
+							"host": ["{{baseUrl}}"],
+							"path": ["docs"]
+						}
+					}
+				},
+				{
+					"name": "Get Specific Documentation",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/docs/:docName",
+							"host": ["{{baseUrl}}"],
+							"path": ["docs", ":docName"],
+							"variable": [
+								{
+									"key": "docName",
+									"value": "auth-routes"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Coupons",
+			"item": [
+				{
+					"name": "Create Coupon",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"code\": \"PROMO2024\",\n  \"discount\": 20.00,\n  \"discountType\": \"PERCENTAGE\",\n  \"validFrom\": \"2024-01-01T00:00:00.000Z\",\n  \"validUntil\": \"2024-12-31T23:59:59.000Z\",\n  \"maxUses\": 100,\n  \"isActive\": true\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/coupons",
+							"host": ["{{baseUrl}}"],
+							"path": ["coupons"]
+						}
+					}
+				},
+				{
+					"name": "List Coupons",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/coupons",
+							"host": ["{{baseUrl}}"],
+							"path": ["coupons"]
+						}
+					}
+				},
+				{
+					"name": "Get Coupon by ID",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/coupons/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["coupons", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Validate Coupon",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/coupons/validate/:code",
+							"host": ["{{baseUrl}}"],
+							"path": ["coupons", "validate", ":code"],
+							"variable": [
+								{
+									"key": "code",
+									"value": "PROMO2024"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Use Coupon",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/coupons/use/:code",
+							"host": ["{{baseUrl}}"],
+							"path": ["coupons", "use", ":code"],
+							"variable": [
+								{
+									"key": "code",
+									"value": "PROMO2024"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Coupon",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"discount\": 25.00,\n  \"isActive\": true\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/coupons/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["coupons", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Delete Coupon",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{authToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/coupons/:id",
+							"host": ["{{baseUrl}}"],
+							"path": ["coupons", ":id"],
+							"variable": [
+								{
+									"key": "id",
+									"value": "1"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Asaas",
+			"item": [
+				{
+					"name": "List Clients",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/asaas/clientes?offset=0&limit=100",
+							"host": ["{{baseUrl}}"],
+							"path": ["asaas", "clientes"],
+							"query": [
+								{
+									"key": "offset",
+									"value": "0"
+								},
+								{
+									"key": "limit",
+									"value": "100"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "List Payments",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/asaas/pagamentos?offset=0&limit=100",
+							"host": ["{{baseUrl}}"],
+							"path": ["asaas", "pagamentos"],
+							"query": [
+								{
+									"key": "offset",
+									"value": "0"
+								},
+								{
+									"key": "limit",
+									"value": "100"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Synchronize All",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/asaas/sincronizar",
+							"host": ["{{baseUrl}}"],
+							"path": ["asaas", "sincronizar"]
+						}
+					}
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:3002",
+			"type": "string"
+		},
+		{
+			"key": "authToken",
+			"value": "",
+			"type": "string"
+		}
+	]
+}

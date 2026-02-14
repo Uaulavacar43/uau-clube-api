@@ -97,6 +97,15 @@ export interface ASAASSubscriptionResponse {
 	externalReference?: string | null;
 }
 
+export interface ASAASSubscriptionListResponse {
+	object: string;
+	hasMore: boolean;
+	totalCount: number;
+	limit: number;
+	offset: number;
+	data: ASAASSubscriptionResponse[];
+}
+
 export interface ASAASUpdateSubscriptionDTO {
 	billingType?: ASAASSubscriptionBillingTypeEnum;
 	value?: number;

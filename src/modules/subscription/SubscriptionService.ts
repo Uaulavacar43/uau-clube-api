@@ -19,7 +19,7 @@ export class SubscriptionService {
 		private planRepository: IPlanRepository,
 		private userRepository: IUserRepository,
 		private mailingQueue: MailingQueue,
-	) {}
+	) { }
 
 	// Função para registrar uma nova assinatura para o carro de um usuário
 	// public async registerSubscription(data: RegisterSubscriptionDTO): Promise<Subscription> {
@@ -104,6 +104,7 @@ export class SubscriptionService {
 		// }
 
 		return await this.subscriptionRepository.update(subscriptionId, {
+			isActive: data.isActive,
 			carId: car.id,
 		});
 	}
@@ -129,8 +130,12 @@ export class SubscriptionService {
 	// }
 
 	// Função para listar assinaturas de um usuário
-	public async listSubscriptions(userId: number): Promise<Subscription[]> {
+	public async listSubscriptionsByUserID(userId: number): Promise<Subscription[]> {
 		return await this.subscriptionRepository.findByUserId(userId, true);
+	}
+
+	public async listSubscriptions(): Promise<Subscription[]> {
+		return await this.subscriptionRepository.findAll();
 	}
 
 	// Função para criar uma assinatura manualmente (apenas ADMIN)
@@ -160,14 +165,14 @@ export class SubscriptionService {
 		// Calcular datas
 		const now = new Date();
 		const startDate = data.startDate ? new Date(data.startDate) : now;
-		
+
 		let endDate: Date;
 		if (data.endDate) {
 			endDate = new Date(data.endDate);
 		} else {
 			endDate = new Date(startDate);
 			const planType = plan.periodicityType?.toUpperCase() || "MONTH";
-			
+
 			switch (planType) {
 				case "QUARTER":
 				case "QUARTERLY":
@@ -230,14 +235,14 @@ export class SubscriptionService {
 
 		const now = new Date();
 		const startDate = data.startDate ? new Date(data.startDate) : now;
-		
+
 		let endDate: Date;
 		if (data.endDate) {
 			endDate = new Date(data.endDate);
 		} else {
 			endDate = new Date(startDate);
 			const planType = subscription.planType?.toUpperCase() || "MONTH";
-			
+
 			switch (planType) {
 				case "QUARTER":
 				case "QUARTERLY":

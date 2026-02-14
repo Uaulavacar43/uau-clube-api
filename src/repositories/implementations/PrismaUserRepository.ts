@@ -27,7 +27,7 @@ export class PrismaUserRepository implements IUserRepository {
 		// Retry logic para produção - tenta até 3 vezes com delay
 		const maxRetries = 3;
 		let lastError: Error | null = null;
-		
+
 		for (let attempt = 1; attempt <= maxRetries; attempt++) {
 			try {
 				const userData = await prisma.user.findUnique({
@@ -37,15 +37,15 @@ export class PrismaUserRepository implements IUserRepository {
 				return this.mapToEntity(userData);
 			} catch (error) {
 				lastError = error instanceof Error ? error : new Error(String(error));
-				
+
 				// Se não for erro de conexão, não tenta novamente
-				const isConnectionError = 
+				const isConnectionError =
 					lastError.message.includes("connect") ||
 					lastError.message.includes("timeout") ||
 					lastError.message.includes("ECONNREFUSED") ||
 					lastError.message.includes("ENOTFOUND") ||
 					lastError.message.includes("P1001"); // Prisma connection error code
-				
+
 				if (!isConnectionError || attempt === maxRetries) {
 					console.error("[PrismaUserRepository.findByEmail] Erro ao buscar usuário:", {
 						email,
@@ -56,14 +56,14 @@ export class PrismaUserRepository implements IUserRepository {
 					});
 					throw lastError;
 				}
-				
+
 				// Aguarda antes de tentar novamente (exponential backoff)
 				const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
 				console.warn(`[PrismaUserRepository.findByEmail] Tentativa ${attempt}/${maxRetries} falhou, tentando novamente em ${delay}ms...`);
 				await new Promise(resolve => setTimeout(resolve, delay));
 			}
 		}
-		
+
 		// Nunca deve chegar aqui, mas TypeScript precisa
 		throw lastError || new Error("Unknown error");
 	}
@@ -149,9 +149,6 @@ export class PrismaUserRepository implements IUserRepository {
 			where: { id, deletedAt: null },
 			include: {
 				subscriptions: {
-					where: {
-						isActive: true,
-					},
 					include: {
 						plan: true,
 						car: true,
@@ -285,15 +282,14 @@ export class PrismaUserRepository implements IUserRepository {
 				WHERE u."deletedAt" IS NULL
 				AND p."status" = 'PAID'
 				${rolesCondition}
-				${
-					searchTerm
-						? Prisma.sql`AND (
+				${searchTerm
+					? Prisma.sql`AND (
 					u."name" ILIKE ${`%${searchTerm}%`} OR
 					u."email" ILIKE ${`%${searchTerm}%`} OR
 					u."phone" ILIKE ${`%${searchTerm}%`} OR
 					u."cpf" ILIKE ${`%${searchTerm}%`}
 				)`
-						: Prisma.empty
+					: Prisma.empty
 				}
 				GROUP BY u.id
 				ORDER BY "lastPaymentDate" ${orderDirection === "desc" ? Prisma.sql`DESC NULLS LAST` : Prisma.sql`ASC NULLS FIRST`}
@@ -315,15 +311,14 @@ export class PrismaUserRepository implements IUserRepository {
 				WHERE u."deletedAt" IS NULL
 				AND p."status" = 'PAID'
 				${rolesCondition}
-				${
-					searchTerm
-						? Prisma.sql`AND (
+				${searchTerm
+					? Prisma.sql`AND (
 					u."name" ILIKE ${`%${searchTerm}%`} OR
 					u."email" ILIKE ${`%${searchTerm}%`} OR
 					u."phone" ILIKE ${`%${searchTerm}%`} OR
 					u."cpf" ILIKE ${`%${searchTerm}%`}
 				)`
-						: Prisma.empty
+					: Prisma.empty
 				}
 			`;
 
@@ -358,31 +353,31 @@ export class PrismaUserRepository implements IUserRepository {
 				OR: !searchTerm
 					? undefined
 					: [
-							{
-								name: {
-									contains: searchTerm,
-									mode: Prisma.QueryMode.insensitive,
-								},
+						{
+							name: {
+								contains: searchTerm,
+								mode: Prisma.QueryMode.insensitive,
 							},
-							{
-								email: {
-									contains: searchTerm,
-									mode: Prisma.QueryMode.insensitive,
-								},
+						},
+						{
+							email: {
+								contains: searchTerm,
+								mode: Prisma.QueryMode.insensitive,
 							},
-							{
-								phone: {
-									contains: searchTerm,
-									mode: Prisma.QueryMode.insensitive,
-								},
+						},
+						{
+							phone: {
+								contains: searchTerm,
+								mode: Prisma.QueryMode.insensitive,
 							},
-							{
-								cpf: {
-									contains: searchTerm,
-									mode: Prisma.QueryMode.insensitive,
-								},
+						},
+						{
+							cpf: {
+								contains: searchTerm,
+								mode: Prisma.QueryMode.insensitive,
 							},
-						],
+						},
+					],
 			};
 
 			usersData = await prisma.user.findMany({
@@ -394,14 +389,14 @@ export class PrismaUserRepository implements IUserRepository {
 					subscriptions: !includePlans
 						? false
 						: {
-								include: {
-									plan: true,
-									car: true,
-								},
-								orderBy: {
-									createdAt: "desc",
-								},
+							include: {
+								plan: true,
+								car: true,
 							},
+							orderBy: {
+								createdAt: "desc",
+							},
+						},
 				},
 			});
 
