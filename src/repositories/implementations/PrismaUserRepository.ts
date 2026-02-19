@@ -90,6 +90,7 @@ export class PrismaUserRepository implements IUserRepository {
 							contains: licensePlate,
 							mode: Prisma.QueryMode.insensitive,
 						},
+						deletedAt: null
 					},
 				},
 			},
@@ -124,6 +125,7 @@ export class PrismaUserRepository implements IUserRepository {
 							contains: licensePlate,
 							mode: Prisma.QueryMode.insensitive,
 						},
+						deletedAt: null
 					},
 				},
 			},
