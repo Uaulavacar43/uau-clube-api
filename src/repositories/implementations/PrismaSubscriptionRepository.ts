@@ -52,6 +52,7 @@ export class PrismaSubscriptionRepository implements ISubscriptionRepository {
 		const subscriptions = await prisma.subscription.findMany({
 			where: {
 				userId,
+				isActive: true,
 			},
 			include: {
 				car: includeCars,
