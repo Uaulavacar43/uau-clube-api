@@ -28,6 +28,7 @@ model User {
   firebaseTokens             String[]
   deletedAt                  DateTime?
   status                     UserStatus                  @default(ACTIVE)
+  welcomeBonusUsed           Boolean                     @default(false)
   requestLogs                RequestLog[]
   webhookLogs                WebhookLog[]
   cars                       Car[]

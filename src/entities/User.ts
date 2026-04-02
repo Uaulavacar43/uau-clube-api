@@ -22,6 +22,7 @@ export class User {
 	public notifications: any[] = [];
 	public asaasCustomerId: string | null = null;
 	public deletedAt: Date | null = null;
+	public welcomeBonusUsed = false;
 
 	constructor(
 		data: Partial<User> & {
@@ -53,5 +54,6 @@ export class User {
 		this.notifications = data.notifications ?? [];
 		this.asaasCustomerId = data.asaasCustomerId ?? null;
 		this.deletedAt = data.deletedAt ?? null;
+		this.welcomeBonusUsed = data.welcomeBonusUsed ?? false;
 	}
 }

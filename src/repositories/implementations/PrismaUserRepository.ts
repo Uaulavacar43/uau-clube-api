@@ -198,6 +198,7 @@ export class PrismaUserRepository implements IUserRepository {
 				otp: data.otp ?? undefined,
 				status: data.status ?? undefined,
 				deletedAt: data.deletedAt ?? undefined,
+				welcomeBonusUsed: data.welcomeBonusUsed ?? undefined,
 			},
 		});
 
@@ -544,6 +545,7 @@ export class PrismaUserRepository implements IUserRepository {
 			notifications: userData.notifications || [],
 			asaasCustomerId: userData.asaasCustomerId,
 			deletedAt: userData.deletedAt,
+			welcomeBonusUsed: userData.welcomeBonusUsed ?? false,
 		});
 	}
 }

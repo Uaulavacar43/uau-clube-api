@@ -20,6 +20,7 @@ import WashLocation from "./modules/washLocation/routes";
 
 // Asaas (sincronização clientes + pagamentos)
 import asaasRoutes from "./assas/asaas.routes";
+import welcomeBonusRoutes from "./modules/welcome-bonus";
 
 const routes = Router();
 
@@ -80,6 +81,9 @@ routes.use("/plans", plans);
 routes.use("/file-upload", fileUploadRoutes);
 routes.use("/docs", docsRoutes);
 routes.use("/coupons", couponRoutes);
+
+// Bônus de boas-vindas
+routes.use("/welcome-bonus", welcomeBonusRoutes);
 
 // Rotas de integração/sincronização com Asaas
 routes.use("/asaas", asaasRoutes);

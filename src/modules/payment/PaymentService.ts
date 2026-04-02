@@ -12,6 +12,7 @@ import type { ISubscriptionRepository } from "../../repositories/interfaces/ISub
 import type { IUserCarRepository } from "../../repositories/interfaces/IUserCarRepository";
 import type { IUserRepository } from "../../repositories/interfaces/IUserRepository";
 import type { IWashServiceRepository } from "../../repositories/interfaces/IWashServiceRepository";
+import { WelcomeBonusService } from "../welcome-bonus/WelcomeBonusService";
 import { asaasGetOrCreateCustomerByCpfCnpj } from "../../utils/asaas/asaasCustomer";
 import { ASAAS_EVENT_STATUS_MAP } from "../../utils/asaas/asaasEventMap";
 import {
@@ -22,6 +23,7 @@ import { asaasGetOrCreateRandomPixKey } from "../../utils/asaas/asaasPixKeys";
 import {
 	asaasCreateSubscription,
 	asaasListSubscriptionPayments,
+	asaasUpdateSubscription,
 } from "../../utils/asaas/asaasSubscriptions";
 import {
 	ASAASPaymentBillingTypeEnum,
@@ -45,6 +47,8 @@ import type { GetAllPaymentsWithDetailsDTO } from "./dto/GetAllPaymentsWithDetai
  * - Persiste entradas de Pagamentos locais
  */
 export class PaymentService {
+	private welcomeBonusService: WelcomeBonusService;
+
 	constructor(
 		private paymentRepository: IPaymentRepository,
 		private planRepository: IPlanRepository,
@@ -54,7 +58,9 @@ export class PaymentService {
 		private washServiceRepository: IWashServiceRepository,
 		private individualServicePurchaseRepository: IIndividualServicePurchaseRepository,
 		private carRepository: IUserCarRepository,
-	) {}
+	) {
+		this.welcomeBonusService = new WelcomeBonusService(userRepository);
+	}
 
 	public async createPayment(data: CreatePaymentDTO, userId: number) {
 		const loggedUser = await this.userRepository.findById(userId);
@@ -224,6 +230,12 @@ export class PaymentService {
 		}
 
 		const coupon = await this.validateCoupon(data.coupon, plan.id);
+
+		// Bônus de boas-vindas
+		const welcomeBonus = this.welcomeBonusService.calculateBonus(
+			new Date(loggedUser.createdAt),
+			loggedUser.welcomeBonusUsed ?? false,
+		);
 
 		// 3) Se o carro já tem assinatura, tocar erro
 		const hasSubscription = await this.carHasSubscription(car.licensePlate);
@@ -455,10 +467,21 @@ export class PaymentService {
 				}),
 			);
 
+			// Calcula desconto total (cupom + bônus boas-vindas)
+			const packageCouponDiscount = coupon
+				? coupon.discountType === "PERCENTAGE"
+					? (plan.price * coupon.discountValue) / 100
+					: coupon.discountValue
+				: 0;
+			const packageDiscountedPrice = Math.max(
+				0,
+				plan.price - packageCouponDiscount - welcomeBonus,
+			);
+
 			const asaasPayment = await asaasCreatePayment({
 				billingType: billingPaymentType,
 				dueDate: dateWithTimeZone.toISOString().split("T")[0],
-				value: plan.price,
+				value: packageDiscountedPrice,
 				installmentCount: data.installments
 					? data.installments > 1
 						? data.installments
@@ -466,7 +489,7 @@ export class PaymentService {
 					: undefined,
 				totalValue: data.installments
 					? data.installments > 1
-						? plan.price
+						? packageDiscountedPrice
 						: undefined
 					: undefined,
 				customer: asaasCustomer.id,
@@ -476,14 +499,9 @@ export class PaymentService {
 					couponId: coupon?.id,
 					planId: plan.id,
 					subId: subscription.id,
+					welcomeBonusAmount: welcomeBonus > 0 ? welcomeBonus : undefined,
 				}),
-				discount: !coupon
-					? undefined
-					: {
-							value: coupon.discountValue,
-							type: coupon.discountType,
-						},
-				creditCard: data.creditCard,
+			creditCard: data.creditCard,
 				creditCardHolderInfo: data.creditCardHolderInfo,
 			});
 
@@ -543,6 +561,7 @@ export class PaymentService {
 				asaasCustomer.id,
 				coupon,
 				billingSubscriptionType,
+				welcomeBonus,
 			);
 
 			if (!result || !result.subscription) {
@@ -719,6 +738,7 @@ export class PaymentService {
 		customerId: string,
 		coupon: Coupon | null,
 		billingType: ASAASSubscriptionBillingTypeEnum,
+		welcomeBonus = 0,
 	) {
 		try {
 			const mapCycle = new Map<PeriodicityType, ASAASSubscriptionCycleEnum>([
@@ -753,11 +773,24 @@ export class PaymentService {
 				}),
 			);
 
+			// Calcula desconto do cupom para o valor inicial
+			const couponDiscount = coupon
+				? coupon.discountType === "PERCENTAGE"
+					? (plan.price * coupon.discountValue) / 100
+					: coupon.discountValue
+				: 0;
+
+			// Valor da 1ª cobrança = preço do plano - desconto cupom - bônus boas-vindas
+			const firstChargeValue = Math.max(
+				0,
+				plan.price - couponDiscount - welcomeBonus,
+			);
+
 			// Preparar o payload da assinatura do ASAAS
 			const payload: ASAASCreateSubscriptionDTO = {
 				customer: customerId,
 				nextDueDate: new Date().toISOString().split("T")[0], // cobrança imediata
-				value: plan.price,
+				value: firstChargeValue,
 				billingType,
 				cycle,
 				description: `Plano: ${plan.name}`,
@@ -766,6 +799,8 @@ export class PaymentService {
 					planId: plan.id,
 					couponId: coupon?.id,
 					subId: subscription.id,
+					welcomeBonusAmount: welcomeBonus > 0 ? welcomeBonus : undefined,
+					planFullPrice: plan.price,
 				}),
 
 				// dados do cartão de crédito
@@ -795,14 +830,6 @@ export class PaymentService {
 								data.creditCardHolderInfo.mobilePhone ??
 								data.creditCardHolderInfo.phone,
 						},
-
-				// desconto no plano
-				discount: !coupon
-					? undefined
-					: {
-							value: coupon.discountValue,
-							type: coupon.discountType,
-						},
 			};
 
 			console.log(
@@ -815,9 +842,27 @@ export class PaymentService {
 			);
 
 			subscription.subscriptionIdAsaas = asaasSubscription.id;
-			subscription.amount = asaasSubscription.value;
+			subscription.amount = plan.price; // salva o preço cheio do plano localmente
 			subscription.paymentMethod = billingType;
 			await this.subscriptionRepository.update(subscription.id, subscription);
+
+			// Se houve bônus de boas-vindas, restaura o valor cheio da assinatura no Asaas
+			// para que a 2ª cobrança em diante seja no preço normal.
+			if (welcomeBonus > 0 || couponDiscount > 0) {
+				try {
+					await asaasUpdateSubscription(asaasSubscription.id, {
+						value: plan.price,
+					});
+					console.log(
+						`[createAsaasSubscription] Valor da assinatura restaurado para R$${plan.price} após 1ª cobrança com desconto.`,
+					);
+				} catch (updateError) {
+					console.error(
+						"[createAsaasSubscription] Erro ao restaurar valor da assinatura:",
+						updateError,
+					);
+				}
+			}
 
 			let pixQrCode: string | null = null;
 			let pixPayload: string | null = null;
@@ -1014,13 +1059,14 @@ export class PaymentService {
 			// Valor do pagamento
 			const amount = Number(body.payment.value) || 0;
 
-			let { userId, planId, couponId, subId } = JSON.parse(
+			let { userId, planId, couponId, subId, welcomeBonusAmount } = JSON.parse(
 				body.payment.externalReference || "",
 			) as {
 				userId?: number;
 				planId?: number;
 				couponId?: number;
 				subId?: number;
+				welcomeBonusAmount?: number;
 			};
 
 			console.log(
@@ -1179,6 +1225,31 @@ export class PaymentService {
 
 					console.log(
 						`[handlePaymentWebhook] Assinatura ${body.payment.installment} atualizada com sucesso => isActive: ${isActive}`,
+					);
+				}
+			}
+
+			// Marca o bônus de boas-vindas como usado após 1ª cobrança confirmada
+			if (
+				newStatus === "PAID" &&
+				welcomeBonusAmount &&
+				welcomeBonusAmount > 0 &&
+				userId
+			) {
+				try {
+					const user = await this.userRepository.findById(userId);
+					if (user && !user.welcomeBonusUsed) {
+						await this.userRepository.update(userId, {
+							welcomeBonusUsed: true,
+						});
+						console.log(
+							`[handlePaymentWebhook] Bônus de boas-vindas marcado como usado para userId: ${userId}`,
+						);
+					}
+				} catch (bonusError) {
+					console.error(
+						"[handlePaymentWebhook] Erro ao marcar bônus como usado:",
+						bonusError,
 					);
 				}
 			}
