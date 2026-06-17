@@ -32,8 +32,10 @@ export class Mailer {
 			console.log("Attempting to send email to:", to);
 			console.log("Using SMTP user:", envConfig.MAILER_USER);
 
+			const fromAddress = envConfig.MAILER_FROM || envConfig.MAILER_USER;
+
 			const info = await this.transporter.sendMail({
-				from: `UAU Clube <${envConfig.MAILER_USER}>`,
+				from: `UAU Clube <${fromAddress}>`,
 				to,
 				bcc: envConfig.MAILER_BCC,
 				subject,
