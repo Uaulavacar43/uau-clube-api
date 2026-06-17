@@ -20,6 +20,7 @@ const schema = z.object({
     MAILER_USER: z.string().min(1, "MAILER_USER is required"),
     MAILER_PASS: z.string().min(1, "MAILER_PASS is required"),
     MAILER_BCC: z.string().optional(),
+    MAILER_FROM: z.string().optional(),
 
     // Se não vier nada, usa o próprio MAILER_USER como e-mail admin.
     MAILER_ADMIN_EMAIL: z
