@@ -97,8 +97,10 @@ export class AuthService {
 			throw new AppError("Credenciais inválidas", 401);
 		}
 
-		if (user.status !== "ACTIVE") {
-			throw new AppError("Conta inativa. Entre em contato com o suporte.", 403);
+		// Apenas BLOCKED e SUSPECT são bloqueados no login.
+		// Usuários INACTIVE (assinatura cancelada) podem logar e renovar normalmente.
+		if (user.status === "BLOCKED" || user.status === "SUSPECT") {
+			throw new AppError("Conta bloqueada. Entre em contato com o suporte.", 403);
 		}
 
 		const token = signToken(
@@ -121,7 +123,6 @@ export class AuthService {
 		userId: number,
 		firebaseToken: string,
 	): Promise<void> {
-		// Adiciona o token à lista
 		await this.userRepository.addFirebaseToken(userId, firebaseToken);
 	}
 
@@ -140,7 +141,6 @@ export class AuthService {
 		userId: number,
 		firebaseToken: string,
 	): Promise<void> {
-		// Remove o token da lista
 		await this.userRepository.removeFirebaseToken(userId, firebaseToken);
 	}
 
