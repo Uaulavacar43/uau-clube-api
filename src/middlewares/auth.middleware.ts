@@ -18,18 +18,22 @@ export const authMiddleware = async (
 	}
 
 	const [, token] = authHeader.split(" ");
+
 	try {
 		const decoded = verifyToken(token);
 		req.user = decoded;
 
 		const userRepository = new PrismaUserRepository();
 		const user = await userRepository.findById(decoded.id);
+
 		if (!user) {
 			throw new AppError("Voce nao tem permissão", 401);
 		}
 
-		if (user.status !== "ACTIVE") {
-			throw new AppError("Conta inativa. Entre em contato com o suporte.", 403);
+		// Apenas BLOCKED e SUSPECT são bloqueados no middleware.
+		// Usuários INACTIVE (assinatura cancelada) podem logar e renovar normalmente.
+		if (user.status === "BLOCKED" || user.status === "SUSPECT") {
+			throw new AppError("Conta bloqueada. Entre em contato com o suporte.", 403);
 		}
 
 		next();
